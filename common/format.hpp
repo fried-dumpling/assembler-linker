@@ -8,7 +8,6 @@ namespace format_data {
 	using u32 = unsigned __int32;
 	using u8 = unsigned __int8;
 	
-
 	enum class SectionType {
 		OUTER,
 		TEXT,
@@ -42,6 +41,19 @@ namespace format_data {
 		list.push_back(conv.u8data[0]);
 	}
 
+	inline u32 read32(std::vector<u8>::const_iterator& it) {
+		union {
+			u32 u32data;
+			u8 u8data[4];
+		} conv;
+
+		conv.u8data[3] = *(it++);
+		conv.u8data[2] = *(it++);
+		conv.u8data[1] = *(it++);
+		conv.u8data[0] = *(it++);
+		return conv.u32data;
+	}
+
 	typedef struct _Section {
 		std::string name;
 		u32 type;
@@ -54,6 +66,15 @@ namespace format_data {
 			push32(out, type);
 			push32(out, start);
 			push32(out, end);
+		}
+
+		void loadRaw(std::vector<u8>::const_iterator& it) {
+			for (; *it != 0; ++it)
+				name.push_back(*it);
+			++it;
+			type = read32(it);
+			start = read32(it);
+			end = read32(it);
 		}
 	} Section;
 
@@ -72,6 +93,16 @@ namespace format_data {
 			push32(out, size);
 			push32(out, exprIndex);
 		}
+
+		void loadRaw(std::vector<u8>::const_iterator& it) {
+			for (; *it != 0; ++it)
+				sectionName.push_back(*it);
+			++it;
+			byteIndex = read32(it);
+			offset = read32(it);
+			size = read32(it);
+			exprIndex = read32(it);
+		}
 	} Mapper;
 
 	typedef struct _Operation {
@@ -82,16 +113,37 @@ namespace format_data {
 			push32(out, type);
 			push32(out, value);
 		}
+
+		void loadRaw(std::vector<u8>::const_iterator& it) {
+			type = read32(it);
+			value = read32(it);
+		}
 	} Operation;
 
 	typedef struct _Identifier {
 		std::string name;
-		u32 value;
+		std::string section;
+		u32 sectionIndex; // index into Format::sections, or (u32)-1 if this identifier has no section (e.g. a resolved constant)
+		u32 value; // offset relative to the start of `sections[sectionIndex]` (or the constant value itself when sectionIndex == -1)
 
 		void getRaw(std::vector<u8>& out) {
 			out.insert(out.end(), name.begin(), name.end());
 			out.push_back(0);
+			out.insert(out.end(), section.begin(), section.end());
+			out.push_back(0);
+			push32(out, sectionIndex);
 			push32(out, value);
+		}
+
+		void loadRaw(std::vector<u8>::const_iterator& it) {
+			for (; *it != 0; ++it)
+				name.push_back(*it);
+			++it;
+			for (; *it != 0; ++it)
+				section.push_back(*it);
+			++it;
+			sectionIndex = read32(it);
+			value = read32(it);
 		}
 	} Identifier;
 
@@ -121,6 +173,22 @@ namespace format_data {
 			push32(out, definedIdentifierEnd);
 			push32(out, usedIdentifierStart);
 			push32(out, usedIdentifierEnd);
+		}
+
+		void loadRaw(std::vector<u8>::const_iterator& it) {
+			read32(it); // stored header size, recomputed via size() on re-serialize
+			sectionsStart = read32(it);
+			sectionsEnd = read32(it);
+			binaryStart = read32(it);
+			binaryEnd = read32(it);
+			mapperStart = read32(it);
+			mapperEnd = read32(it);
+			expressionsStart = read32(it);
+			expressionsEnd = read32(it);
+			definedIdentifierStart = read32(it);
+			definedIdentifierEnd = read32(it);
+			usedIdentifierStart = read32(it);
+			usedIdentifierEnd = read32(it);
 		}
 	} Header;
 
@@ -176,6 +244,63 @@ namespace format_data {
 			out.insert(out.end(), expressionsRaw.begin(), expressionsRaw.end());
 			out.insert(out.end(), definedIdentifierRaw.begin(), definedIdentifierRaw.end());
 			out.insert(out.end(), usedIdentifierRaw.begin(), usedIdentifierRaw.end());
+		}
+
+		void loadRaw(const std::vector<u8>& in) {
+			clear();
+
+			auto it = in.cbegin();
+			Header header = {};
+			header.loadRaw(it);
+
+			auto sectionsIt = in.cbegin() + header.sectionsStart;
+			auto sectionsEndIt = in.cbegin() + header.sectionsEnd;
+			while (sectionsIt < sectionsEndIt) {
+				Section s = {};
+				s.loadRaw(sectionsIt);
+				sections.push_back(s);
+			}
+
+			binary.assign(in.cbegin() + header.binaryStart, in.cbegin() + header.binaryEnd);
+
+			auto mapperIt = in.cbegin() + header.mapperStart;
+			auto mapperEndIt = in.cbegin() + header.mapperEnd;
+			while (mapperIt < mapperEndIt) {
+				Mapper m = {};
+				m.loadRaw(mapperIt);
+				mapper.push_back(m);
+			}
+
+			auto exprIt = in.cbegin() + header.expressionsStart;
+			auto exprEndIt = in.cbegin() + header.expressionsEnd;
+			while (exprIt < exprEndIt) {
+				std::vector<Operation> expr;
+				Operation op = {};
+				do {
+					op = {};
+					op.loadRaw(exprIt);
+					expr.push_back(op);
+				} while (op.type != (u32)OperationType::EOX);
+				expressions.push_back(expr);
+			}
+
+			auto definedIt = in.cbegin() + header.definedIdentifierStart;
+			auto definedEndIt = in.cbegin() + header.definedIdentifierEnd;
+			while (definedIt < definedEndIt) {
+				Identifier id = {};
+				id.loadRaw(definedIt);
+				definedIdentifier.push_back(id);
+			}
+
+			auto usedIt = in.cbegin() + header.usedIdentifierStart;
+			auto usedEndIt = in.cbegin() + header.usedIdentifierEnd;
+			while (usedIt < usedEndIt) {
+				std::string name;
+				for (; *usedIt != 0; ++usedIt)
+					name.push_back(*usedIt);
+				++usedIt;
+				usedIdentifier.push_back(name);
+			}
 		}
 	} Format;
 }

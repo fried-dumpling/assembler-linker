@@ -32,6 +32,16 @@ int main(int argc, char* argv[]) {
 	const char* inputFile = argv[1];
 	const char* outputFile = argv[2];
 
+	// label mangling uses the output binary's own base name (no directory, no extension) so
+	// same-named labels from different object files don't collide once the linker merges them
+	std::string outputBase = outputFile;
+	size_t slashPos = outputBase.find_last_of("/\\");
+	if (slashPos != std::string::npos)
+		outputBase = outputBase.substr(slashPos + 1);
+	size_t dotPos = outputBase.find_last_of('.');
+	if (dotPos != std::string::npos)
+		outputBase = outputBase.substr(0, dotPos);
+
 	bool dumpFile = false, dumpToken = false, dumpPreproc = false, dumpAST = false, dumpEvaluate = false, dumpBinary = false, doubleOutput = false;
 	for (int i = 3; i < argc; i++) {
 		std::string flag = argv[i];
@@ -80,7 +90,7 @@ int main(int argc, char* argv[]) {
 
 	std::vector<u8> binary;
 
-	assembler::assemble(buff, binary, dump);
+	assembler::assemble(buff, binary, dump, outputBase);
 
 	if (dumpToken) {
 		cout << "lex->" << endl;

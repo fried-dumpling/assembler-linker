@@ -4,7 +4,7 @@ setlocal
 
 set SCRIPT_DIR=%~dp0
 set SRC=%SCRIPT_DIR%linker\main.cpp
-set OUT=%SCRIPT_DIR%linker.exe
+set OUT=%SCRIPT_DIR%build\linker.exe
 
 where g++ >nul 2>nul
 if errorlevel 1 (

@@ -1244,6 +1244,7 @@ namespace assembler {
 
 		namespace functions {
 			using SectionType = format_data::SectionType;
+			using OperationType = format_data::OperationType;
 			
 			enum class ExprType {
 				CONSTANT,
@@ -1251,7 +1252,6 @@ namespace assembler {
 				COMPLEX
 			};
 			
-			using OperationType = format_data::OperationType;
 			
 			typedef struct _ReplaceData {
 				u32 index;
@@ -1362,6 +1362,8 @@ namespace assembler {
 			} DataValue;
 
 			typedef struct _EvalData {
+				std::string fileName; // set before evaluation; read by format::formatData() (via mangleLabel) when building the serialized Format, not used during evaluation itself -- idenifierValue/expressionValue stay keyed by the raw label name throughout evaluation
+
 				std::unordered_map<std::string, ExprData> idenifierValue;
 				std::unordered_map<AST*, ExprData> expressionValue;
 				std::unordered_map<AST*, InstValue> instructionValue;
@@ -1375,6 +1377,17 @@ namespace assembler {
 				std::vector<std::vector<OperationToken>> operationVector;
 				std::vector<u32> compressionIndex;
 			} EvalData;
+
+			// Labels are mangled with the (output-binary-based) file name so that identically
+			// named labels defined in different object files don't collide once the linker merges
+			// their symbol tables (see linker::evaluate::functions::mapExpr's cross-file lookup).
+			// '#' can't appear in a source identifier, so this can never collide with a real name.
+			// Empty fileName leaves the label unmangled (e.g. for ad-hoc/debug evaluation). Applied
+			// only in format::formatData(), not during evaluation -- calculateConst's identifier
+			// lookups stay on the raw label name, since idenifierValue is keyed by it directly.
+			inline std::string mangleLabel(const std::string& fileName, const std::string& label) {
+				return fileName.empty() ? label : (fileName + "#" + label);
+			}
 
 			int hex2int(std::string text) {
 				bool neg = false;
@@ -1625,10 +1638,10 @@ namespace assembler {
 
 				SectionType type = SectionType::OUTER;
 				switch (cur->type) {
-					case (u64)ASTNodeType::text_section: type = SectionType::TEXT; goto process_section;
-					case (u64)ASTNodeType::data_section: type = SectionType::DATA; goto process_section;
-					case (u64)ASTNodeType::bss_section: type = SectionType::BSS; goto process_section;
-					case (u64)ASTNodeType::outer_section: type = SectionType::OUTER; goto process_section;
+					case (u64)ASTNodeType::text_section + (u64)TokenType::__end: type = SectionType::TEXT; goto process_section;
+					case (u64)ASTNodeType::data_section + (u64)TokenType::__end: type = SectionType::DATA; goto process_section;
+					case (u64)ASTNodeType::bss_section + (u64)TokenType::__end: type = SectionType::BSS; goto process_section;
+					case (u64)ASTNodeType::outer_section + (u64)TokenType::__end: type = SectionType::OUTER; goto process_section;
 						process_section: {
 							size_t index = data->sections.size();
 							for (auto it = data->sectioningArr.cbegin(); it != data->sectioningArr.cend(); ++it)
@@ -1636,7 +1649,7 @@ namespace assembler {
 
 							Section nSection;
 							nSection.type = type;
-							nSection.name = cur->child.empty() ? "" : cur->child[0]->text;
+							nSection.name = (!cur->child.empty() && cur->child[0]->type == (u64)TokenType::identifier) ? cur->child[0]->text : "";
 							data->sections.push_back(nSection);
 							data->sectionByte.push_back(0);
 							break;
@@ -2217,11 +2230,12 @@ namespace assembler {
 					nOper.type = (u32)si->type;
 
 					if (si->type == evaluator::functions::OperationType::IDENTIFIER) {
-						auto find = usedIdentifierIndex.find(si->text);
+						std::string mangled = evaluator::functions::mangleLabel(data.fileName, si->text);
+						auto find = usedIdentifierIndex.find(mangled);
 						if (find == usedIdentifierIndex.end()) {
 							u32 idx = (u32)format.usedIdentifier.size();
-							usedIdentifierIndex[si->text] = idx;
-							format.usedIdentifier.push_back(si->text);
+							usedIdentifierIndex[mangled] = idx;
+							format.usedIdentifier.push_back(mangled);
 							nOper.value = idx;
 						}
 						else
@@ -2243,14 +2257,24 @@ namespace assembler {
 
 			for (auto it = data.idenifierValue.cbegin(); it != data.idenifierValue.cend(); ++it) {
 				Identifier nId = {};
-				nId.name = it->first;
+				nId.name = evaluator::functions::mangleLabel(data.fileName, it->first);
+				if (it->second.coeff.empty()) {
+					nId.section = "";
+					nId.sectionIndex = (u32)-1;
+				}
+				else {
+					size_t section_id = it->second.coeff.cbegin()->first;
+					nId.section = data.sections[section_id].name;
+					nId.sectionIndex = (u32)section_id;
+				}
 				nId.value = (u32)it->second.value;
 				format.definedIdentifier.push_back(nId);
 			}
 
 			u32 base = 0;
 			for (auto it = data.sections.cbegin(); it != data.sections.cend(); ++it) {
-				base = format.binary.size();
+				base = (u32)format.binary.size();
+
 				for (auto si = it->operationMap.cbegin(); si != it->operationMap.cend(); ++si) {
 					Mapper nMap = {};
 					nMap.sectionName = it->name;
@@ -2266,7 +2290,7 @@ namespace assembler {
 				nSec.name = it->name;
 				nSec.type = (u32)it->type;
 				nSec.start = base;
-				nSec.end = base + it->data.size();
+				nSec.end = base + (u32)it->data.size();
 				format.sections.push_back(nSec);
 				format.binary.insert(format.binary.end(), it->data.begin(), it->data.end());
 			}
@@ -2677,7 +2701,7 @@ namespace assembler {
 		std::vector<evaluator::functions::Section> sectionDump;
 	} AssemblerDump;
 
-	int assemble(const std::string& text, std::vector<u8>& binary, AssemblerDump& dump) {
+	int assemble(const std::string& text, std::vector<u8>& binary, AssemblerDump& dump, const std::string& fileName = "") {
 		using TokenType = lexer::TokenType;
 		using Token = lexer::Token;
 		using Parser = parser::Parser;
@@ -2737,6 +2761,7 @@ namespace assembler {
 		}
 
 		evaluator::functions::EvalData data;
+		data.fileName = fileName;
 		evaluator::setTree(pAST);
 		bool validEvaluate = evaluator::evaluate(data);
 		dump.evalSuccess = validEvaluate;
