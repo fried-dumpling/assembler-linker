@@ -15,12 +15,21 @@ namespace stack_machine_generator {
 			u32 value;
 		} Element;
 
-		// function(ret, opType, args): computes ret from args.size() operands, returns false on failure (e.g. div by zero)
-		typedef bool(*StackMachineFunction)(u32&, Operation, const std::vector<u32>&);
+		// function(ret, opType, args): computes ret from args.size() operands, returns 0 on success;
+		// any other value is an error code that run() propagates unchanged.
+		typedef int(*StackMachineFunction)(u32&, Operation, const std::vector<u32>&);
+
+		// run()'s own error codes (as opposed to ones returned by `function`, which pass through
+		// unchanged): 0 = success.
+		enum class RunError {
+			SUCCESS = 0,
+			STACK_UNDERFLOW, // an operator needed more operands than were on the run stack
+			INVALID_RESULT   // after processing every element, the stack didn't end with exactly one value
+		};
 
 		// src: postfix (RPN) element list. Operation::CONSTANT elements are leaves pushed as-is;
 		// any other element pops `value` operands off the run stack, calls `function`, and pushes the result as CONSTANT.
-		bool run(const std::vector<Element>& src, StackMachineFunction function, u32& result) const {
+		int run(const std::vector<Element>& src, StackMachineFunction function, u32& result) const {
 			std::vector<Element> runstack;
 
 			for (auto it = src.cbegin(); it != src.cend(); ++it) {
@@ -30,7 +39,7 @@ namespace stack_machine_generator {
 				}
 
 				if (runstack.size() < it->value)
-					return false;
+					return (int)RunError::STACK_UNDERFLOW;
 
 				std::vector<u32> args;
 				for (size_t i = runstack.size() - it->value; i < runstack.size(); i++)
@@ -39,17 +48,17 @@ namespace stack_machine_generator {
 
 				Element ret = {};
 				ret.type = Operation::CONSTANT;
-				if (!function(ret.value, it->type, args))
-					return false;
+				int code = function(ret.value, it->type, args);
+				if (code) return code;
 
 				runstack.push_back(ret);
 			}
 
 			if (runstack.size() != 1)
-				return false;
+				return (int)RunError::INVALID_RESULT;
 
 			result = runstack.back().value;
-			return true;
+			return (int)RunError::SUCCESS;
 		}
 	};
 }

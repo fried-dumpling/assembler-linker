@@ -33,18 +33,18 @@ namespace evaluator_generator {
 
 		AST* tree;
 	public:
-		typedef bool(*EvaluateFunction)(AST*, void*);
-		typedef bool(*TBEvaluateFunction)(std::vector<AST*>&, AST*, void*);
+		typedef int(*EvaluateFunction)(AST*, void*);
+		typedef int(*TBEvaluateFunction)(std::vector<AST*>&, AST*, void*);
 
 		Evaluator() {
 			this->tree = NULL;
 		}
-		
+
 		void setTree(AST* tree) {
 			this->tree = tree;
 		}
 
-		bool evaluate(EvaluateFunction function, void* data) {
+		int evaluate(EvaluateFunction function, void* data) {
 			std::vector<AST*> orderVec;
 			std::stack<AST*> stack;
 			stack.push(this->tree);
@@ -55,23 +55,24 @@ namespace evaluator_generator {
 					stack.push(*it);
 			}
 			for (auto it = orderVec.rbegin(); it != orderVec.rend(); ++it) {
-				if (!function(*it, data)) return false;
+				int code = function(*it, data);
+				if (code) return code;
 			}
-			return true;
+			return 0;
 		}
 
-		bool evaluateTB(TBEvaluateFunction function, void* data) {
+		int evaluateTB(TBEvaluateFunction function, void* data) {
 			std::stack<AST*> stack;
 			stack.push(this->tree);
 			while (!stack.empty()) {
 				AST* cur = stack.top(); stack.pop();
 				std::vector<AST*> next;
-				if (!function(next, cur, data))
-					return false;
+				int code = function(next, cur, data);
+				if (code) return code;
 				for (auto it = cur->child.begin(); it != cur->child.end(); ++it)
 					stack.push(*it);
 			}
-			return true;
+			return 0;
 		}
 	};
 }

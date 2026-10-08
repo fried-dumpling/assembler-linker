@@ -1356,6 +1356,8 @@ namespace lexer_generator {
 			std::string text;
 			TokenType type;
 			int line;
+			int fileLine;
+			int fileId;
 
 			inline operator TokenType() const {
 				return this->type;

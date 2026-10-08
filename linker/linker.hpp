@@ -56,19 +56,27 @@ namespace linker {
             }
         }
 
-        bool function(u32& ret, OpType oper, const std::vector<u32>& args) {
+        // function()'s own error codes: 0 = success.
+        enum class FunctionError {
+            SUCCESS = 0,
+            DIV_BY_ZERO,
+            MOD_BY_ZERO,
+            UNKNOWN_OPERATOR // oper isn't one function() knows how to evaluate (e.g. IDENTIFIER/CONSTANT/EOX reaching here is a caller bug)
+        };
+
+        int function(u32& ret, OpType oper, const std::vector<u32>& args) {
             switch (oper) {
-            case OpType::ADD: ret = (u32)((s32)args[0] + (s32)args[1]); return true;
-            case OpType::SUB: ret = (u32)((s32)args[0] - (s32)args[1]); return true;
-            case OpType::MULT: ret = (u32)((s32)args[0] * (s32)args[1]); return true;
+            case OpType::ADD: ret = (u32)((s32)args[0] + (s32)args[1]); return (int)FunctionError::SUCCESS;
+            case OpType::SUB: ret = (u32)((s32)args[0] - (s32)args[1]); return (int)FunctionError::SUCCESS;
+            case OpType::MULT: ret = (u32)((s32)args[0] * (s32)args[1]); return (int)FunctionError::SUCCESS;
             case OpType::DIV:
-                if (args[1] == 0) return false;
+                if (args[1] == 0) return (int)FunctionError::DIV_BY_ZERO;
                 ret = (u32)((s32)args[0] / (s32)args[1]);
-                return true;
+                return (int)FunctionError::SUCCESS;
             case OpType::MOD:
-                if (args[1] == 0) return false;
+                if (args[1] == 0) return (int)FunctionError::MOD_BY_ZERO;
                 ret = (u32)((s32)args[0] % (s32)args[1]);
-                return true;
+                return (int)FunctionError::SUCCESS;
             case OpType::POW: {
                 s32 base = (s32)args[0];
                 u32 power = args[1];
@@ -76,26 +84,26 @@ namespace linker {
                 for (u32 i = 0; i < power; i++)
                     r *= base;
                 ret = (u32)r;
-                return true;
+                return (int)FunctionError::SUCCESS;
             }
-            case OpType::SHIFTL: ret = (u32)((s32)args[0] << (s32)args[1]); return true;
-            case OpType::SHIFTR: ret = (u32)((s32)args[0] >> (s32)args[1]); return true;
-            case OpType::BND: ret = args[0] & args[1]; return true;
-            case OpType::BOR: ret = args[0] | args[1]; return true;
-            case OpType::BXR: ret = args[0] ^ args[1]; return true;
-            case OpType::BNT: ret = ~args[0]; return true;
-            case OpType::LESS: ret = ((s32)args[0] < (s32)args[1]) ? 1 : 0; return true;
-            case OpType::GREATER: ret = ((s32)args[0] > (s32)args[1]) ? 1 : 0; return true;
-            case OpType::LESSEQUAL: ret = ((s32)args[0] <= (s32)args[1]) ? 1 : 0; return true;
-            case OpType::GREATEQUAL: ret = ((s32)args[0] >= (s32)args[1]) ? 1 : 0; return true;
-            case OpType::EQUAL: ret = (args[0] == args[1]) ? 1 : 0; return true;
-            case OpType::NOTEQUAL: ret = (args[0] != args[1]) ? 1 : 0; return true;
-            case OpType::LAND: ret = (args[0] != 0 && args[1] != 0) ? 1 : 0; return true;
-            case OpType::LOR: ret = (args[0] != 0 || args[1] != 0) ? 1 : 0; return true;
-            case OpType::LNOT: ret = (args[0] == 0) ? 1 : 0; return true;
-            case OpType::NEG: ret = (u32)(-(s32)args[0]); return true;
-            case OpType::SELECT: ret = (args[0] != 0) ? args[1] : args[2]; return true;
-            default: return false;
+            case OpType::SHIFTL: ret = (u32)((s32)args[0] << (s32)args[1]); return (int)FunctionError::SUCCESS;
+            case OpType::SHIFTR: ret = (u32)((s32)args[0] >> (s32)args[1]); return (int)FunctionError::SUCCESS;
+            case OpType::BND: ret = args[0] & args[1]; return (int)FunctionError::SUCCESS;
+            case OpType::BOR: ret = args[0] | args[1]; return (int)FunctionError::SUCCESS;
+            case OpType::BXR: ret = args[0] ^ args[1]; return (int)FunctionError::SUCCESS;
+            case OpType::BNT: ret = ~args[0]; return (int)FunctionError::SUCCESS;
+            case OpType::LESS: ret = ((s32)args[0] < (s32)args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::GREATER: ret = ((s32)args[0] > (s32)args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::LESSEQUAL: ret = ((s32)args[0] <= (s32)args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::GREATEQUAL: ret = ((s32)args[0] >= (s32)args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::EQUAL: ret = (args[0] == args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::NOTEQUAL: ret = (args[0] != args[1]) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::LAND: ret = (args[0] != 0 && args[1] != 0) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::LOR: ret = (args[0] != 0 || args[1] != 0) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::LNOT: ret = (args[0] == 0) ? 1 : 0; return (int)FunctionError::SUCCESS;
+            case OpType::NEG: ret = (u32)(-(s32)args[0]); return (int)FunctionError::SUCCESS;
+            case OpType::SELECT: ret = (args[0] != 0) ? args[1] : args[2]; return (int)FunctionError::SUCCESS;
+            default: return (int)FunctionError::UNKNOWN_OPERATOR;
             }
         }
 
@@ -103,7 +111,9 @@ namespace linker {
 
         // Runs an already-built RPN element list (see evaluate::functions::castOperation for how
         // a raw format::Operation list - terminated by EOX - becomes one of these) to a single value.
-        inline bool runOperation(const std::vector<Element>& elements, u32& result) {
+        // Returns 0 on success; any other value is an error code from function() or from the
+        // StackMachine's own run() (StackMachine::RunError), propagated unchanged.
+        inline int runOperation(const std::vector<Element>& elements, u32& result) {
             return stackMachine.run(elements, function, result);
         }
     }
@@ -117,6 +127,40 @@ namespace linker {
 			using Section = format_data::Section;
 			using Operation = format_data::Operation;
 
+            // A section's bytes as a list of (possibly non-contiguous) ranges into
+            // EvalData::initialBin, in append order -- avoids copying the same bytes into every
+            // stage of the pipeline; only the final flatten (mergeByType, into textBin/dataBin/
+            // bssBin) actually materializes a contiguous buffer.
+            typedef struct Indexer {
+            public:
+                std::vector<std::pair<u32, u32>> indexes; // {start, end} into initialBin, end exclusive
+
+                void add(u32 start, u32 end) {
+                    indexes.push_back({ start, end });
+                }
+
+                // total logical length across every range (i.e. as if they were concatenated)
+                u32 size() const {
+                    u32 total = 0;
+                    for (auto it = indexes.cbegin(); it != indexes.cend(); ++it)
+                        total += it->second - it->first;
+                    return total;
+                }
+
+                // translates a logical offset `id` (0-based, as if every range were concatenated)
+                // into the absolute offset into the buffer the ranges point into
+                u32 get(u32 id) const {
+                    u32 seen = 0;
+                    for (auto it = indexes.cbegin(); it != indexes.cend(); ++it) {
+                        u32 len = it->second - it->first;
+                        if (id - seen < len)
+                            return it->first + (id - seen);
+                        seen += len;
+                    }
+                    return 0; // out of range
+                }
+            } Indexer;
+
             typedef struct _MapData {
                 u32 byteIndex;
                 u32 offset;
@@ -127,8 +171,8 @@ namespace linker {
             typedef struct _SectionData {
                 std::string name;
                 SectionType type;
-                std::vector<u8> binary;               // bytes for the section (all same-(type,name) blocks concatenated, in encounter order)
-                std::unordered_map<u32, MapData> map;  // keyed by offset into `binary` above
+                Indexer ninIndex; //indexes for initialBin for lookup
+                std::unordered_map<u32, MapData> map;  // keyed by logical offset into `ninIndex` above (as if its ranges were concatenated)
 
                 u32 sectionOffset;   // this section's final absolute base once merged into text/data/bss (filled by mergeByType)
                 std::vector<u8> calcBin; // relocated bytes, filled by a later "apply relocations" pass -- not written here
@@ -149,13 +193,17 @@ namespace linker {
                 std::string name;
                 std::unordered_map<std::string, u32> nameMap; // keyed by "<type>#<name>" -> index into `sections` below
                 std::vector<SectionData> sections;  // in first-encountered order within this file -- use nameMap for lookup by (type, name)
+
                 std::unordered_map<std::string, PendingLabel> pendingLabels; // identifier name -> not-yet-resolved location; mergeByType finishes these into definedLabel
+
                 std::map<std::string, u32> definedLabel;       // resolved to final absolute addresses (filled by mergeByType)
-                std::vector<std::vector<Operation>> expressions;
                 std::vector<std::string> usedIdentifier; // copy of Format::usedIdentifier -- an expression's IDENTIFIER operation value indexes into this
+                std::vector<std::vector<Operation>> expressions;
             } FileData;
 
 			typedef struct _EvalData {
+                std::vector<u8> initialBin; //just initial combined binary for later lookup
+
                 std::unordered_map<std::string, u32> nameMap; // keyed by "<type>#<name>" -> index into `sections` below
                 std::vector<SectionData> sections; // one entry per (type, name), merged across every file, in first-encountered order (mergeByName)
 
@@ -216,8 +264,11 @@ namespace linker {
                             idx = slotIt->second;
 
                         SectionData& sd = file.sections[idx];
-                        localBase.push_back((u32)sd.binary.size());
-                        sd.binary.insert(sd.binary.end(), obj.binary.begin() + si->start, obj.binary.begin() + si->end);
+                        localBase.push_back(sd.ninIndex.size());
+
+                        u32 rangeStart = (u32)data.initialBin.size();
+                        data.initialBin.insert(data.initialBin.end(), obj.binary.begin() + si->start, obj.binary.begin() + si->end);
+                        sd.ninIndex.add(rangeStart, (u32)data.initialBin.size());
                     }
 
                     // si: each relocation this file's assembler recorded, matched back to the
@@ -300,8 +351,11 @@ namespace linker {
                             idx = slotIt->second;
 
                         SectionData& merged = data.sections[idx];
-                        si->sectionOffset = (u32)merged.binary.size(); // offset within the cross-file blob, for now
-                        merged.binary.insert(merged.binary.end(), si->binary.begin(), si->binary.end());
+                        si->sectionOffset = merged.ninIndex.size(); // offset within the cross-file blob, for now
+                        // ti: each (possibly non-contiguous) range making up this file's section --
+                        // just copy the small {start,end} pair, never the bytes themselves
+                        for (auto ti = si->ninIndex.indexes.cbegin(); ti != si->ninIndex.indexes.cend(); ++ti)
+                            merged.ninIndex.add(ti->first, ti->second);
                     }
                 }
 
@@ -328,13 +382,16 @@ namespace linker {
                     }
 
                     it->sectionOffset = (u32)group->size(); // group-relative for now
-                    group->insert(group->end(), it->binary.begin(), it->binary.end());
+                    // si: each range making up this merged section's bytes, appended in order --
+                    // this is the one place the pipeline actually copies bytes (out of initialBin)
+                    for (auto si = it->ninIndex.indexes.cbegin(); si != it->ninIndex.indexes.cend(); ++si)
+                        group->insert(group->end(), data.initialBin.begin() + si->first, data.initialBin.begin() + si->second);
 
                     Section placement = {};
                     placement.name = it->name;
                     placement.type = (u32)it->type;
                     placement.start = it->sectionOffset;
-                    placement.end = it->sectionOffset + (u32)it->binary.size();
+                    placement.end = it->sectionOffset + it->ninIndex.size();
                     placements->push_back(placement);
                 }
 
@@ -450,7 +507,7 @@ namespace linker {
 
                     // si: each of that file's sections
                     for (auto si = it->sections.begin(); si != it->sections.end(); ++si) {
-                        // ti: each relocation recorded for this section, keyed by its byte offset within si->binary
+                        // ti: each relocation recorded for this section, keyed by its logical offset within si->ninIndex
                         for (auto ti = si->map.cbegin(); ti != si->map.cend(); ++ti) {
                             const MapData& reloc = ti->second;
                             if (reloc.exprIndex >= it->expressions.size())
@@ -461,7 +518,7 @@ namespace linker {
                                 return false;
 
                             u32 value = 0;
-                            if (!stackMachine::runOperation(elements, value))
+                            if (stackMachine::runOperation(elements, value) != 0)
                                 return false;
 
                             u32 bytePos = si->sectionOffset + ti->first;

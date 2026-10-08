@@ -19,17 +19,30 @@ using namespace assembler::lexer;
 using namespace assembler::parser;
 using namespace assembler::evaluator;
 
+int fileIO(std::string& text, std::string path) {
+	if (!iotools::readTextFile(path, text)) {
+		cout << "failed to read input file \'" << path << "\'" << endl;
+		return -1;
+	}
+
+	return 0;
+}
+
 int main(int argc, char* argv[]) {
 	iotools::setDirectory();
 
 	assembler::createAssembler();
+	assembler::fileIoFunc = fileIO;
 
 	if (argc < 3) {
-		std::cout << "usage: assembler <input file> <output file> <-file, -token, -preproc, -eval, -bin, -double>..." << std::endl;
+		std::cout << "usage: assembler <input file> <output file> [-file, -token, -preproc, -eval, -bin, -double] ..." << std::endl;
 		return -1;
 	}
 
-	const char* inputFile = argv[1];
+	// resolved relative to the invoking shell's own current directory (not the executable's
+	// directory) so included-file paths and duplicate-#include detection are stable no matter
+	// where the caller's cwd is or whether they passed a relative or absolute input path.
+	std::string inputFile = iotools::absolutePath(argv[1]);
 	const char* outputFile = argv[2];
 
 	// label mangling uses the output binary's own base name (no directory, no extension) so
@@ -90,7 +103,7 @@ int main(int argc, char* argv[]) {
 
 	std::vector<u8> binary;
 
-	assembler::assemble(buff, binary, dump, outputBase);
+	assembler::assemble(buff, binary, dump, inputFile, outputBase);
 
 	if (dumpToken) {
 		cout << "lex->" << endl;

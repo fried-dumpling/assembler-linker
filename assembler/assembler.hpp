@@ -67,6 +67,14 @@ namespace assembler {
 
 			text, data, bss,
 
+			global,
+			_extern,
+			equ,
+
+			include,
+			ifndef,
+			ifdef,
+
 			define,
 			macro,
 			end,
@@ -210,6 +218,14 @@ namespace assembler {
 				{ "\\.data", TokenType::data },
 				{ "\\.bss", TokenType::bss },
 
+				{ "global", TokenType::global },
+				{ "extern", TokenType::_extern },
+				{ "equ", TokenType::equ },
+
+				{ "#include<[^>\t\n]*>", TokenType::include },
+				{ "#ifndef", TokenType::ifndef },
+				{ "#ifdef", TokenType::ifdef },
+
 				{ "#define", TokenType::define },
 				{ "#macro", TokenType::macro },
 				{ "#end", TokenType::end },
@@ -264,7 +280,7 @@ namespace assembler {
 				{ "##[a-zA-Z_][a-zA-Z0-9_]*", TokenType::identifier_unique },
 
 				{ "\'([^\\\\\n\t\']|(\\\\([nt\\\\]|([0-9]{1,3}))))\'", TokenType::character},
-				{ "\"[^\n\"]*([^\n\"]+(\\\\[\n\"])+)*\"", TokenType::string },
+				{ "\"([^\\\\\"\n]|\\\\(.|\n))*\"", TokenType::string },
 
 				{ ";[^\n]*", TokenType::comment },
 				{ "/\\*[^*]*\\*+([^/*][^*]*\\*+)*/", TokenType::comment },
@@ -293,6 +309,10 @@ namespace assembler {
 			{ TokenType::shiftr, "shiftr" },
 			{ TokenType::shiftrc, "shiftrc" },
 			{ TokenType::shiftri, "shiftri" },
+			{ TokenType::rol, "rol" },
+			{ TokenType::roli, "roli" },
+			{ TokenType::ror, "ror" },
+			{ TokenType::rori, "rori" },
 			{ TokenType::cmp, "cmp" },
 			{ TokenType::cmpi, "cmpi" },
 			{ TokenType::test, "test" },
@@ -368,6 +388,14 @@ namespace assembler {
 			{ TokenType::data, ".data" },
 			{ TokenType::bss, ".bss" },
 
+			{ TokenType::global, "global" },
+			{ TokenType::_extern, "extern" },
+			{ TokenType::equ, "equ" },
+
+			{ TokenType::include, "include" },
+			{ TokenType::ifndef, "ifndef" },
+			{ TokenType::ifdef, "ifdef" },
+
 			{ TokenType::define, "define" },
 			{ TokenType::macro, "macro" },
 			{ TokenType::end, "end" },
@@ -410,6 +438,8 @@ namespace assembler {
 			{ TokenType::logampersend, "logampersend" },
 			{ TokenType::logverticalbar, "logverticalbar" },
 			{ TokenType::selector, "selector" },
+
+			{ TokenType::curline, "curline" },
 
 			{ TokenType::hexnum, "hexnum" },
 			{ TokenType::decnum, "decnum" },
@@ -493,6 +523,26 @@ namespace assembler {
 				return ans;
 			}
 
+			bool includePath(std::string& path, std::string text) {
+				path.clear();
+
+				auto it = text.begin();
+				// "#include<...>"
+				for (; it != text.end() && *it != '<'; ++it);
+				if (it == text.end())
+					return false;
+				++it;
+
+				for (; it != text.end() && *it != '>'; ++it)
+					path.push_back(*it);
+				if (it == text.end())
+					return false;
+				++it;
+				if (it != text.end())
+					return false;
+				return true;
+			}
+
 			enum class State {
 				normal,
 				readDefine_identifier,
@@ -502,9 +552,25 @@ namespace assembler {
 				readMacro_argCount,
 				readMacro_token,
 
+				readInclude,
+				resumeInclude,
+
 				replace_getArg,
 				replace_comma,
 				replace
+			};
+
+			// PreprocessFunction return codes: 0 = success, anything else is propagated
+			// unchanged by Preprocesser::preprocess()/preprocesser::preprocess() up to assemble().
+			enum class PreprocessError {
+				SUCCESS = 0,
+				MACRO_ARG_OUT_OF_RANGE,   // #macro invoked with fewer args than a #<n> placeholder refers to
+				EXPECTED_DEFINE_IDENTIFIER, // #define not followed by an identifier
+				EXPECTED_MACRO_IDENTIFIER,  // #macro not followed by an identifier
+				EXPECTED_MACRO_ARGCOUNT,     // #macro identifier not followed by a decimal arg count
+				INVALID_INCLUDE_PATH,	// #include<...>'s path is not valid
+				DUPLICATE_INCLUDE,     // #include<...> resolves to a file already included (catches cycles too)
+				INCLUDE_REQUEST
 			};
 
 			typedef struct _PreprocData {
@@ -523,9 +589,21 @@ namespace assembler {
 				std::vector<Token> replaceTokens;
 
 				int uniqueCounter;
+
+				std::string includePath;
+				std::vector<Token>::iterator resumeBeg;
+				// Count of not-yet-visited tokens from the spliced-in included block, rather than
+				// an end iterator: as removeUnused erases whitespace/newline/comment tokens inside
+				// that block, any iterator computed up front (resumeBeg + curToken.size()) goes
+				// stale (points at the wrong slot once the vector shrinks). A countdown that's
+				// decremented once per visited original slot, erased or not, lands exactly on the
+				// stale #include<...> token when it hits 0, regardless of how much got erased.
+				int resumeRemaining;
 			} PreprocData;
 
-			bool handleReplace(Vec tokens, Iter it, void* vpdata) {
+			typedef int()();
+
+			int handleReplace(Vec tokens, Iter it, void* vpdata) {
 				PreprocData* data = (PreprocData*)vpdata;
 
 				switch (data->state) {
@@ -570,7 +648,7 @@ namespace assembler {
 							if (si->type == TokenType::macro_arg) {
 								int id = macroArg2int(si->text) - 1;
 								if (id < 0 || id >= data->args.size())
-									return false;
+									return (int)PreprocessError::MACRO_ARG_OUT_OF_RANGE;
 								si = data->replaceTokens.erase(si);
 								si = data->replaceTokens.insert(si, data->args[id].begin(), data->args[id].end());
 							}
@@ -587,8 +665,12 @@ namespace assembler {
 						data->uniqueCounter++;
 						it = tokens.insert(it, data->replaceTokens.begin(), data->replaceTokens.end());
 						data->state = State::normal;
-						return true;
+						return (int)PreprocessError::SUCCESS;
 					}
+					break;
+				
+				case State::resumeInclude:
+					data->state = State::normal;
 					break;
 
 				case State::normal:
@@ -626,6 +708,14 @@ namespace assembler {
 						break;
 					}
 
+					case TokenType::include: {
+						std::string path = "";
+						if (!includePath(path, it->text))
+							return (int)PreprocessError::INVALID_INCLUDE_PATH;
+						data->includePath = path;
+						return (int)PreprocessError::INCLUDE_REQUEST;
+					}
+
 					default:
 						it++;
 						break;
@@ -639,7 +729,7 @@ namespace assembler {
 						it = tokens.erase(it);
 					}
 					else
-						return false;
+						return (int)PreprocessError::EXPECTED_DEFINE_IDENTIFIER;
 					break;
 				case State::readDefine_token:
 					switch (it->type) {
@@ -672,7 +762,7 @@ namespace assembler {
 						it = tokens.erase(it);
 					}
 					else
-						return false;
+						return (int)PreprocessError::EXPECTED_MACRO_IDENTIFIER;
 					break;
 				case State::readMacro_argCount:
 					if (it->type == TokenType::decnum) {
@@ -681,7 +771,7 @@ namespace assembler {
 						it = tokens.erase(it);
 					}
 					else
-						return false;
+						return (int)PreprocessError::EXPECTED_MACRO_ARGCOUNT;
 					break;
 				case State::readMacro_token:
 					switch (it->type) {
@@ -699,35 +789,119 @@ namespace assembler {
 					break;
 				}
 
-				return true;
+				return (int)PreprocessError::SUCCESS;
 			}
 
-			bool removeUnused(Vec tokens, Iter it, void* vpdata) {
+			int removeUnused(Vec tokens, Iter it, void* vpdata) {
 				PreprocData* data = (PreprocData*)vpdata;
+				switch (data->state) {
+				case State::resumeInclude:
+					if (data->resumeRemaining == 0) {
+						// every original slot of the spliced-in included block has been visited
+						// (erased or not) -- `it` now sits exactly on the stale #include<...> token
+						// it was inserted in front of (see insertInclude()). Drop it and fall back
+						// to normal processing for the rest of the document.
+						it = tokens.erase(it);
+						data->state = State::normal;
+						break;
+					}
+					// still inside the freshly-spliced-in included tokens -- strip them like any
+					// other token (fallthrough), counting this slot as visited.
+					data->resumeRemaining--;
+				case State::normal:
+					switch (it->type) {
+					case TokenType::whitespace:
+					case TokenType::newline:
+					case TokenType::comment:
+						it = tokens.erase(it);
+						break;
 
-				switch (it->type) {
-				case TokenType::whitespace:
-				case TokenType::newline:
-				case TokenType::comment:
-					it = tokens.erase(it);
-					break;
-
-				default:
-					it++;
-					break;
+					default:
+						it++;
+						break;
+					}
 				}
 
-				return true;
+				return (int)PreprocessError::SUCCESS;
 			}
 		}
 
-		void tagLine(std::vector<lexer::Token>& tokens) {
-			int curLine = 1;
+		inline int tagLine(std::vector<lexer::Token>& tokens, int line = 1, int file = 0) {
+			int relLine = 1;
 			for (auto it = tokens.begin(); it != tokens.end(); ++it) {
-				it->line = curLine;
-				if (it->type == lexer::TokenType::newline)
-					curLine++;
+				it->line = line;
+				it->fileLine = relLine;
+				it->fileId = file;
+				if (it->type == lexer::TokenType::newline) {
+					line++;
+					relLine++;
+				}
 			}
+			return line;
+		}
+
+		// Maps an absolute (cross-file) line number back to the file it came from and the line
+		// within that file. absLine is unique per source line across the whole concatenated
+		// multi-file token stream (see tagLine() above), so backupTokens - the pre-preprocessing
+		// token list, which still has every line intact - always has at least one token carrying
+		// it. Returns false if absLine isn't present (e.g. out of range).
+		inline bool resolveSourceLocation(const std::vector<lexer::Token>& backupTokens, int absLine, int& fileId, int& fileLine) {
+			for (auto it = backupTokens.cbegin(); it != backupTokens.cend(); ++it) {
+				if (it->line == absLine) {
+					fileId = it->fileId;
+					fileLine = it->fileLine;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Lexically collapses "." and ".." path segments (e.g. "A/B/../C" -> "A/C",
+		// "A/./C" -> "A/C") without touching the filesystem, so textually different but
+		// equivalent paths (e.g. reached via different #include<..> detours) compare equal
+		// when checked against includedFiles for duplicate/circular #include detection.
+		// Accepts either '/' or '\\' as a separator and always re-joins with '\\' to match
+		// the backslash-separated absolute paths iotools::absolutePath() produces.
+		inline std::string normalizePath(const std::string& path) {
+			std::string prefix;
+			std::string rest = path;
+
+			size_t colon = path.find(':');
+			if (colon != std::string::npos) {
+				prefix = path.substr(0, colon + 1);
+				rest = path.substr(colon + 1);
+			}
+
+			std::vector<std::string> segments;
+			std::string cur;
+			for (size_t i = 0; i <= rest.size(); i++) {
+				if (i == rest.size() || rest[i] == '/' || rest[i] == '\\') {
+					if (cur == "..") {
+						if (!segments.empty())
+							segments.pop_back();
+					}
+					else if (!cur.empty() && cur != ".") {
+						segments.push_back(cur);
+					}
+					cur.clear();
+				}
+				else {
+					cur.push_back(rest[i]);
+				}
+			}
+
+			std::string result = prefix;
+			for (auto it = segments.cbegin(); it != segments.cend(); ++it) {
+				result.push_back('\\');
+				result += *it;
+			}
+			return result;
+		}
+
+		inline void insertInclude(std::vector<lexer::Token>& token, const std::vector<lexer::Token>& curToken, functions::PreprocData& data) {
+			data.resumeBeg = token.insert(data.resumeBeg, curToken.cbegin(), curToken.cend());
+			data.resumeRemaining = (int)curToken.size();
+			data.state = functions::State::resumeInclude;
 		}
 
 		Preprocesser preprocesser;
@@ -736,14 +910,27 @@ namespace assembler {
 			preprocesser.setTokens(tokens);
 		}
 
-		inline bool preprocess(functions::PreprocData& data) {
-			data.state = functions::State::normal;
-			data.depth = 0;
-			data.uniqueCounter = 0;
-			if (!preprocesser.preprocess(functions::removeUnused, &data)) return false;
-			if (!preprocesser.preprocess(functions::handleReplace, &data)) return false;
+		inline int preprocess(functions::PreprocData& data) {
+			auto beg = preprocesser.begin();
 
-			return true;
+			if (data.state == functions::State::resumeInclude) {
+				beg = data.resumeBeg;
+			} else {
+				data.state = functions::State::normal;
+				data.depth = 0;
+				data.uniqueCounter = 0;
+			}
+			
+			auto it = beg;
+			int code = preprocesser.preprocess(it, functions::removeUnused, &data);
+			if (code) return code;
+
+			it = beg;
+			code = preprocesser.preprocess(it, functions::handleReplace, &data);
+			data.resumeBeg = it;
+			if (code) return code;
+
+			return (int)functions::PreprocessError::SUCCESS;
 		}
 	}
 
@@ -763,6 +950,7 @@ namespace assembler {
 
 			intruction,
 			label,
+			equate,
 
 			allocate,
 			allocate_zero,
@@ -835,6 +1023,7 @@ namespace assembler {
 			instruction_CACHE,
 
 			label,
+			equate,
 
 			reg_ex,
 
@@ -876,6 +1065,7 @@ namespace assembler {
 
 			{ NonterminalType::intruction, "intruction" },
 			{ NonterminalType::label, "label" },
+			{ NonterminalType::equate, "equate" },
 			{ NonterminalType::allocate, "allocate" },
 			{ NonterminalType::allocate_zero, "allocate_zero" },
 
@@ -944,6 +1134,7 @@ namespace assembler {
 			{ ASTNodeType::allocate, "allocate" },
 			{ ASTNodeType::allocate_zero, "allocate_zero" },
 			{ ASTNodeType::label, "label" },
+			{ ASTNodeType::equate, "equate" },
 
 			{ ASTNodeType::reg_ex, "reg_ex" },
 
@@ -984,7 +1175,7 @@ namespace assembler {
 			{ { NT::__accept, AT::__accept, -1 }, { { NT::program, true, false } } },
 
 			{ { NT::program, AT::program, -1}, { { NT::section, true, true } } },
-
+			
 			{ { NT::section, AT::text_section, -1 }, { { TT::text, false , false }, { NT::text_section, true, false }, { NT::section, true, true } } },
 			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { NT::data_section, true, false }, { NT::section, true, true } } },
 			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { NT::bss_section, true, false }, { NT::section, true, true } } },
@@ -996,27 +1187,40 @@ namespace assembler {
 			{ { NT::section, AT::text_section, -1 }, { { TT::text, false, false }, { NT::text_section, true, false } } },
 			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { NT::data_section, true, false} } },
 			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { NT::bss_section, true, false } } },
+			{ { NT::section, AT::text_section, -1 }, { { TT::text, false, false }, { TT::identifier, true, false}, { NT::text_section, true, false } } },
+			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { TT::identifier, true, false}, { NT::data_section, true, false} } },
+			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { TT::identifier, true, false}, { NT::bss_section, true, false } } },
 			{ { NT::section, AT::outer_section, -1 }, { { NT::outer_section, true, false } } },
 
 			{ { NT::section, AT::text_section, -1 }, { { TT::text, false , false }, { NT::section, true, true } } },
 			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { NT::section, true, true } } },
 			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { NT::section, true, true } } },
+			{ { NT::section, AT::text_section, -1 }, { { TT::text, false , false }, { TT::identifier, true, false}, { NT::section, true, true } } },
+			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { TT::identifier, true, false}, { NT::section, true, true } } },
+			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { TT::identifier, true, false}, { NT::section, true, true } } },
 
 			{ { NT::section, AT::text_section, -1 }, { { TT::text, false, false } } },
 			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false } } },
 			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false } } },
+			{ { NT::section, AT::text_section, -1 }, { { TT::text, false, false }, { TT::identifier, true, false} } },
+			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { TT::identifier, true, false} } },
+			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { TT::identifier, true, false} } },
 
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::allocate, true, false }, { NT::data_section, true, true } } },
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::label, true, false }, { NT::data_section, true, true } } },
+			{ { NT::data_section, AT::data_section, -1 }, { { NT::equate, true, false }, { NT::data_section, true, true } } },
 
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::allocate, true, false } } },
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::label, true, false } } },
+			{ { NT::data_section, AT::data_section, -1 }, { { NT::equate, true, false } } },
 
 			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::allocate_zero, true, false }, { NT::bss_section, true, true } } },
 			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::label, true, false }, { NT::bss_section, true, true } } },
+			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::equate, true, false }, { NT::bss_section, true, true } } },
 
 			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::allocate_zero, true, false } } },
 			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::label, true, false } } },
+			{ { NT::bss_section, AT::bss_section, -1 }, { { NT::equate, true, false } } },
 
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::intruction, true, false }, { NT::text_section, true, true } } },
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::label, true, false }, { NT::text_section, true, true } } },
@@ -1139,6 +1343,8 @@ namespace assembler {
 			{ { NT::immidate8, AT::immidate8, -1 }, { { NT::expression, true, false } } },
 
 			{ { NT::label, AT::label, 0 }, { { TT::identifier, false, false }, { TT::colon, false, false } } },
+
+			{ { NT::equate, AT::equate, 0 }, { { TT::identifier, false, false }, { TT::equ, false, false }, { NT::expression, true, false } } },
 
 			{ { NT::allocate, AT::allocate, 0 }, { { NT::expression, true, false }, { TT::comma, false, false },  { NT::expression, true, false } } },
 			{ { NT::allocate_zero, AT::allocate_zero, 0 }, { { NT::expression, true, false } } },
@@ -1315,6 +1521,15 @@ namespace assembler {
 				SUB_LIKE,
 				SCALE_LIKE,
 				NEG_LIKE
+			};
+
+			// EvaluateFunction return codes: 0 = success, anything else is propagated
+			// unchanged by Evaluator::evaluate()/evaluator::evaluate() up to assemble().
+			enum class EvaluateError {
+				SUCCESS = 0,
+				MISSING_EXPRESSION,  // a child node's expression value wasn't computed (unresolved identifier / invalid subexpression)
+				NEGATIVE_INDEX,      // index[...] evaluated to a negative constant
+				NOT_CONSTANT         // a size/length expression (allocate, allocate_zero) must fold to a constant
 			};
 
 			std::unordered_map<size_t, s32> addCoeff(const std::unordered_map<size_t, s32>& a, const std::unordered_map<size_t, s32>& b) {
@@ -1633,7 +1848,7 @@ namespace assembler {
 				{ TokenType::ALL, 0x80 }
 			};
 
-			bool calculateSection(AST* cur, void* vpData) {
+			int calculateSection(AST* cur, void* vpData) {
 				EvalData* data = (EvalData*)vpData;
 
 				SectionType type = SectionType::OUTER;
@@ -1673,7 +1888,7 @@ namespace assembler {
 						break;
 				}
 
-				return true;
+				return (int)EvaluateError::SUCCESS;
 			}
 
 			ExprData combineBinary(const ExprData& a, const ExprData& b, OperationType opType, const std::string& opText, s32(*constFn)(s32, s32), LinearKind kind) {
@@ -1774,7 +1989,7 @@ namespace assembler {
 				return r;
 			}
 
-			bool calculateConst(AST* cur, void* vpData) {
+			int calculateConst(AST* cur, void* vpData) {
 				EvalData* data = (EvalData*)vpData;
 
 				bool child1exp = (cur->child.size() >= 1) ? data->expressionValue.find(cur->child[0]) != data->expressionValue.end() : false;
@@ -1796,7 +2011,7 @@ namespace assembler {
 				case (u64)TokenType::plus:
 					if (cur->child.size() == 1) {
 						if (child1exp) data->expressionValue[cur] = data->expressionValue[cur->child[0]];
-						else return false;
+						else return (int)EvaluateError::MISSING_EXPRESSION;
 						break;
 					}
 					operationType = OperationType::ADD; operationText = "+"; function = [](s32 a, s32 b) { return a + b; }; linearKind = LinearKind::ADD_LIKE; goto binaryOp;
@@ -1822,7 +2037,7 @@ namespace assembler {
 					if (child1exp && child2exp)
 						data->expressionValue[cur] = combineBinary(data->expressionValue[cur->child[0]], data->expressionValue[cur->child[1]], operationType, operationText, function, linearKind);
 					else
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 					break;
 
 				case (u64)TokenType::tilde: operationType = OperationType::BNT; operationText = "~"; unaryFunction = [](s32 a) { return ~a; }; linearKind = LinearKind::NONE; goto unaryOp;
@@ -1832,7 +2047,7 @@ namespace assembler {
 					if (child1exp)
 						data->expressionValue[cur] = combineUnary(data->expressionValue[cur->child[0]], operationType, operationText, unaryFunction, linearKind);
 					else
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 					break;
 
 				case (u64)TokenType::selector: {
@@ -1874,7 +2089,7 @@ namespace assembler {
 				case (u64)ASTNodeType::index + (u64)TokenType::__end:
 					if (child1exp) {
 						if (data->expressionValue[cur->child[0]].value < 0)
-							return false;
+							return (int)EvaluateError::NEGATIVE_INDEX;
 						data->expressionValue[cur] = data->expressionValue[cur->child[0]];
 					}
 					break;
@@ -1915,9 +2130,9 @@ namespace assembler {
 
 					auto find = data->expressionValue.find(cur->child[0]);
 					if (find == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 					if (find->second.type != ExprType::CONSTANT)
-						return false;
+						return (int)EvaluateError::NOT_CONSTANT;
 
 					data->sectionByte[section_id] += find->second.value;
 					break;
@@ -1928,16 +2143,16 @@ namespace assembler {
 
 					auto find = data->expressionValue.find(cur->child[0]);
 					if (find == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 					if (find->second.type != ExprType::CONSTANT)
-						return false;
+						return (int)EvaluateError::NOT_CONSTANT;
 
 					data->sectionByte[section_id] += find->second.value;
 					break;
 				}
 				}
 
-				return true;
+				return (int)EvaluateError::SUCCESS;
 			}
 
 			void push32(std::vector<u8>& list, u32 inst) {
@@ -1985,14 +2200,14 @@ namespace assembler {
 					data->sections[sectionId].operationMap.insert({ basePos-it->offset/8, ReplaceData{it->index, it->size, it->offset%8}});
 			}
 
-			bool evaluateCode(AST* cur, void* vpData) {
+			int evaluateCode(AST* cur, void* vpData) {
 				EvalData* data = (EvalData*)vpData;
 				u32 sectionId = data->sectionIdMap[cur];
 
 				switch (cur->type) {
 				case (u64)ASTNodeType::allocate + (u64)TokenType::__end: {
 					if (data->expressionValue.find(cur->child[1]) == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 
 					ExprData& expr = data->expressionValue[cur->child[1]];
 					if (expr.type == ExprType::CONSTANT)
@@ -2093,7 +2308,7 @@ namespace assembler {
 					break;
 				case (u64)ASTNodeType::reg_index + (u64)TokenType::__end: {
 					if (data->expressionValue.find(cur->child[1]) == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 
 					ExprData& expr = data->expressionValue[cur->child[1]];
 					if (expr.type == ExprType::CONSTANT)
@@ -2122,7 +2337,7 @@ namespace assembler {
 
 				case (u64)ASTNodeType::immidate16 + (u64)TokenType::__end: {
 					if (data->expressionValue.find(cur->child[0]) == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 
 					ExprData& expr = data->expressionValue[cur->child[0]];
 					if (expr.type == ExprType::CONSTANT)
@@ -2140,7 +2355,7 @@ namespace assembler {
 				}
 				case (u64)ASTNodeType::immidate8 + (u64)TokenType::__end: {
 					if (data->expressionValue.find(cur->child[0]) == data->expressionValue.end())
-						return false;
+						return (int)EvaluateError::MISSING_EXPRESSION;
 
 					ExprData& expr = data->expressionValue[cur->child[0]];
 					if (expr.type == ExprType::CONSTANT)
@@ -2158,10 +2373,10 @@ namespace assembler {
 				}
 				}
 
-				return true;
+				return (int)EvaluateError::SUCCESS;
 			}
 
-			inline bool collapseExpr(EvalData* data) {
+			inline int collapseExpr(EvalData* data) {
 				std::unordered_map<std::vector<OperationToken>, size_t, HashOperation, EqualOperation> checked;
 				u32 compressIndex = 0;
 				for (size_t i = 0; i < data->operationVector.size(); i++) {
@@ -2182,7 +2397,7 @@ namespace assembler {
 						}
 					}
 				}
-				return true;
+				return (int)EvaluateError::SUCCESS;
 			}
 		}
 
@@ -2192,13 +2407,17 @@ namespace assembler {
 			evaluator.setTree(tree);
 		}
 
-		inline bool evaluate(functions::EvalData& data) {
-			if (!evaluator.evaluate(functions::calculateSection, &data)) return false;
-			if (!evaluator.evaluate(functions::calculateConst, &data)) return false;
-			if (!evaluator.evaluate(functions::evaluateCode, &data)) return false;
-			functions::collapseExpr(&data);
+		inline int evaluate(functions::EvalData& data) {
+			int code = evaluator.evaluate(functions::calculateSection, &data);
+			if (code) return code;
+			code = evaluator.evaluate(functions::calculateConst, &data);
+			if (code) return code;
+			code = evaluator.evaluate(functions::evaluateCode, &data);
+			if (code) return code;
+			code = functions::collapseExpr(&data);
+			if (code) return code;
 
-			return true;
+			return (int)functions::EvaluateError::SUCCESS;
 		}
 	}
 
@@ -2303,7 +2522,7 @@ namespace assembler {
 		}
 	}
 
-	const unsigned long long version = 400;
+	const unsigned long long version = 404;
 
 	namespace cache {
 		using u64 = unsigned __int64;
@@ -2696,31 +2915,99 @@ namespace assembler {
 		bool parseSuccess = false, preprocSuccess = false, evalSuccess = false;
 		std::vector<lexer::Token> tokens;
 		std::vector<preprocesser::Token> preprocTokens;
-		std::string errorMessage;
 		parser::Parser::ASTNode* pAST;
 		std::vector<evaluator::functions::Section> sectionDump;
+		std::string errorMessage;
 	} AssemblerDump;
 
-	int assemble(const std::string& text, std::vector<u8>& binary, AssemblerDump& dump, const std::string& fileName = "") {
+	typedef int(*getFileIO)(std::string&, std::string);
+
+	getFileIO fileIoFunc;
+
+	int assemble(const std::string& text, std::vector<u8>& binary, AssemblerDump& dump, std::string fileName, std::string outputMangle) {
 		using TokenType = lexer::TokenType;
 		using Token = lexer::Token;
 		using Parser = parser::Parser;
 
+		
 		std::vector<Token> tokens;
-		lexer::lexer.lex(tokens, text);
-		preprocesser::tagLine(tokens);
-		std::vector<Token> tokenBackup = tokens;
-
-		if (dump.flags & AssemblerDump::getToken) {
-			dump.tokens = tokens;
-		}
+		std::vector<Token> tokenBackup;
+		std::vector<std::string> includedFiles = { preprocesser::normalizePath(fileName) };
+		int line = 0;
+		int fileId = 0;
+		
+		std::string curText;
+		std::vector<Token> curTokens;
 
 		preprocesser::functions::PreprocData preprocData;
+		preprocData.state = preprocesser::functions::State::normal;
+		int preprocessError = 0;
+
+		// initial lex/preprocess
+		lexer::lexer.lex(tokens, text);
+		// tag BEFORE backing up -- tokenBackup takes independent copies, so tagging tokens
+		// afterward would never reach them, leaving .line/.fileLine/.fileId uninitialized there.
+		line = preprocesser::tagLine(tokens);
+		tokenBackup.insert(tokenBackup.end(), tokens.begin(), tokens.end());
 		preprocesser::setTokens(tokens);
-		bool validPreprocess = preprocesser::preprocess(preprocData);
+		
+		while (true) {
+			preprocessError = preprocesser::preprocess(preprocData);
+
+			if (preprocessError == 0)
+				break;
+			if (preprocessError != (int)preprocesser::functions::PreprocessError::INCLUDE_REQUEST)
+				break;
+
+			//get file -- resolve the #include<path> relative to fileName's own directory
+			std::string baseDir = fileName;
+			size_t baseSlash = baseDir.find_last_of("/\\");
+			baseDir = (baseSlash == std::string::npos) ? "" : baseDir.substr(0, baseSlash + 1);
+			// normalize before comparing/storing so "A/B/../C" and "A/C" (or "A/./C") are
+			// recognized as the same file for duplicate/circular #include detection.
+			std::string path = preprocesser::normalizePath(baseDir + preprocData.includePath);
+
+			// already included (directly or via a cycle) -- reject instead of re-reading it,
+			// which would just splice the same tokens in again forever.
+			bool alreadyIncluded = false;
+			for (auto it = includedFiles.cbegin(); it != includedFiles.cend(); ++it) {
+				if (*it == path) {
+					alreadyIncluded = true;
+					break;
+				}
+			}
+			if (alreadyIncluded) {
+				preprocessError = (int)preprocesser::functions::PreprocessError::DUPLICATE_INCLUDE;
+				break;
+			}
+
+			if(fileIoFunc(curText, path) != 0)
+				return -1;
+			// guarantee a trailing newline even if the file on disk doesn't end with one, so
+			// tagLine()'s line counter always advances past the included content exactly once
+			// and resolveSourceLocation() can't get its line numbers off by one as a result.
+			if (curText.empty() || curText.back() != '\n')
+				curText.push_back('\n');
+			fileId++;
+			includedFiles.push_back(path);
+
+			// lex
+			lexer::lexer.lex(curTokens, curText);
+
+			// preprocess -- tag before backing up, same reasoning as the initial lex/preprocess above
+			line = preprocesser::tagLine(curTokens, line, fileId);
+			tokenBackup.insert(tokenBackup.end(), curTokens.begin(), curTokens.end());
+			preprocesser::insertInclude(tokens, curTokens, preprocData);
+		}
+
+		if (dump.flags & AssemblerDump::getToken) {
+			dump.tokens = tokenBackup;
+		}
+
+		bool validPreprocess = preprocessError == 0;
 		dump.preprocSuccess = validPreprocess;
 
-		if (dump.flags & AssemblerDump::getPreproc || !validPreprocess) {
+		if (dump.flags & AssemblerDump::getPreproc || !dump.preprocSuccess) {
 			dump.preprocTokens = tokens;
 		}
 
@@ -2739,8 +3026,17 @@ namespace assembler {
 
 		if (dump.flags & AssemblerDump::getEval || !validParse) {
 			if (!dump.parseSuccess) {
-				dump.errorMessage = "error at line ";
-				dump.errorMessage += std::to_string(errorLine);
+				int errFileId = 0, errFileLine = 0;
+				if (preprocesser::resolveSourceLocation(tokenBackup, errorLine, errFileId, errFileLine)) {
+					dump.errorMessage = "error at ";
+					dump.errorMessage += (errFileId >= 0 && errFileId < (int)includedFiles.size()) ? includedFiles[errFileId] : std::to_string(errFileId);
+					dump.errorMessage += " line ";
+					dump.errorMessage += std::to_string(errFileLine);
+				}
+				else {
+					dump.errorMessage = "error at line ";
+					dump.errorMessage += std::to_string(errorLine);
+				}
 				dump.errorMessage += ": ";
 				for (auto it = tokenBackup.cbegin(); it->line <= errorLine && it != tokenBackup.cend(); ++it) {
 					if (it->line == errorLine) {
@@ -2761,9 +3057,9 @@ namespace assembler {
 		}
 
 		evaluator::functions::EvalData data;
-		data.fileName = fileName;
+		data.fileName = outputMangle;
 		evaluator::setTree(pAST);
-		bool validEvaluate = evaluator::evaluate(data);
+		bool validEvaluate = evaluator::evaluate(data) == 0;
 		dump.evalSuccess = validEvaluate;
 
 		if (!validEvaluate) {
