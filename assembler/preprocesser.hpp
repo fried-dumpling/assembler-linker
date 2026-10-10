@@ -40,11 +40,20 @@ namespace preproccesser_generator {
 			return this->tokens->begin();
 		}
 
-		int preprocess(PreprocessFunction function, void* data) {
+		// on failure errorToken is the token the callback was looking at (line = -1 past the last token)
+		int preprocess(Token& errorToken, PreprocessFunction function, void* data) {
 			auto it = this->tokens->begin();
 			for (; it != this->tokens->end(); ) {
 				int code = function(*this->tokens, it, data);
-				if (code) return code;
+				if (code) {
+					if (it != this->tokens->end())
+						errorToken = *it;
+					else {
+						errorToken = {};
+						errorToken.line = -1;
+					}
+					return code;
+				}
 			}
 			return 0;
 		}

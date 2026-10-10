@@ -545,6 +545,7 @@ namespace assembler {
 
 			enum class State {
 				normal,
+
 				readDefine_identifier,
 				readDefine_token,
 
@@ -553,8 +554,10 @@ namespace assembler {
 				readMacro_token,
 
 				readInclude,
+				readIf,
 
-				replace_identifier
+				replace_identifier,
+				remove
 			};
 
 			// PreprocessFunction return codes: 0 = success, anything else is propagated
@@ -566,8 +569,29 @@ namespace assembler {
 				EXPECTED_MACRO_IDENTIFIER,  // #macro not followed by an identifier
 				EXPECTED_MACRO_ARGCOUNT,     // #macro identifier not followed by a decimal arg count
 				INVALID_INCLUDE_PATH,	// #include<...>'s path is not valid
-				DUPLICATE_INCLUDE     // #include<...> resolves to a file already included (catches cycles too)
+				DUPLICATE_INCLUDE,     // #include<...> resolves to a file already included (catches cycles too)
+				EXPECTED_IF_IDENTIFIER,  // #ifdef/#ifndef not followed by an identifier
+				UNEXPECTED_END,          // #end with no open #ifdef/#ifndef (or #macro)
+				UNTERMINATED_IF,         // #ifdef/#ifndef block still open at the end of the input
+				UNTERMINATED_DIRECTIVE   // #define/#macro/macro call still incomplete at the end of the input
 			};
+
+			inline const char* preprocessErrorName(int code) {
+				switch ((PreprocessError)code) {
+				case PreprocessError::SUCCESS: return "success";
+				case PreprocessError::MACRO_ARG_OUT_OF_RANGE: return "macro argument out of range";
+				case PreprocessError::EXPECTED_DEFINE_IDENTIFIER: return "expected identifier after #define";
+				case PreprocessError::EXPECTED_MACRO_IDENTIFIER: return "expected identifier after #macro";
+				case PreprocessError::EXPECTED_MACRO_ARGCOUNT: return "expected argument count after #macro name";
+				case PreprocessError::INVALID_INCLUDE_PATH: return "invalid include path";
+				case PreprocessError::DUPLICATE_INCLUDE: return "duplicate include";
+				case PreprocessError::EXPECTED_IF_IDENTIFIER: return "expected identifier after #ifdef/#ifndef";
+				case PreprocessError::UNEXPECTED_END: return "#end without matching #ifdef/#ifndef";
+				case PreprocessError::UNTERMINATED_IF: return "#ifdef/#ifndef without matching #end";
+				case PreprocessError::UNTERMINATED_DIRECTIVE: return "unterminated directive";
+				}
+				return "unknown error";
+			}
 
 			typedef struct _PreprocData {
 				State state;
@@ -577,6 +601,12 @@ namespace assembler {
 				int curMacroArgCount;
 				int depth;
 				std::unordered_map<std::string, std::pair<std::vector<Token>, int>> replaceTable;
+				bool invert = false;
+
+				// opening #ifdef/#ifndef tokens of the blocks currently open (kept for error location)
+				std::vector<Token> ifOpen;
+				// directives opened inside a block being removed, so their #end isn't taken as the block's
+				int removeDepth = 0;
 
 				std::vector<Token> curArg;
 				std::vector<std::vector<Token>> args;
@@ -586,7 +616,7 @@ namespace assembler {
 				std::string fileName;
 				std::unordered_set<std::string> includedFiles;
 
-				int uniqueCounter;
+				int uniqueCounter = 0;
 			} PreprocData;
 
 			template<class FuncSig> class FunctionRef;
@@ -700,6 +730,27 @@ namespace assembler {
 						data->state = State::normal;
 					}
 					break;
+				
+				case State::remove:
+					switch (it->type) {
+					case TokenType::ifdef:
+					case TokenType::ifndef:
+					case TokenType::macro:
+						data->removeDepth++;
+						break;
+					case TokenType::end:
+						if (data->removeDepth)
+							data->removeDepth--;
+						else {
+							data->ifOpen.pop_back();
+							data->state = State::normal;
+						}
+						break;
+					default:
+						break;
+					}
+					it = tokens.erase(it);
+					break;
 
 				case State::normal:
 					switch (it->type) {
@@ -757,11 +808,45 @@ namespace assembler {
 						break;
 					}
 
+					case TokenType::ifndef:
+					case TokenType::ifdef:
+						data->invert = (it->type == TokenType::ifndef);
+						data->ifOpen.push_back(*it);
+						data->state = State::readIf;
+						it = tokens.erase(it);
+						break;
+
+					// closes a #ifdef/#ifndef whose condition was true (a #macro's #end is
+					// consumed in readMacro_token, a removed block's in remove)
+					case TokenType::end:
+						if (data->ifOpen.empty())
+							return (int)PreprocessError::UNEXPECTED_END;
+						data->ifOpen.pop_back();
+						it = tokens.erase(it);
+						break;
+
 					default:
 						it++;
 						break;
 					}
 					break;
+
+				case State::readIf: {
+					if (it->type != TokenType::identifier)
+						return (int)PreprocessError::EXPECTED_IF_IDENTIFIER;
+
+					bool found = data->replaceTable.find(it->text) != data->replaceTable.end();
+					if (data->invert ? found : !found) {
+						data->state = State::remove;
+						data->removeDepth = 0;
+					}
+					else
+						data->state = State::normal;
+
+					it = tokens.erase(it);
+					break;
+				}
+
 				case State::readDefine_identifier:
 					if (it->type == TokenType::identifier) {
 						data->state = State::readDefine_token;
@@ -772,6 +857,7 @@ namespace assembler {
 					else
 						return (int)PreprocessError::EXPECTED_DEFINE_IDENTIFIER;
 					break;
+
 				case State::readDefine_token:
 					switch (it->type) {
 					case TokenType::openparen:
@@ -809,6 +895,7 @@ namespace assembler {
 					if (it->type == TokenType::decnum) {
 						data->state = State::readMacro_token;
 						data->curMacroArgCount = dec2int(it->text);
+						data->removeDepth = 0;
 						it = tokens.erase(it);
 					}
 					else
@@ -816,7 +903,21 @@ namespace assembler {
 					break;
 				case State::readMacro_token:
 					switch (it->type) {
+					// #ifdef/#ifndef blocks inside the body are kept as body tokens (evaluated
+					// when the macro expands); only the #end at depth 0 closes the macro
+					case TokenType::ifdef:
+					case TokenType::ifndef:
+						data->removeDepth++;
+						data->curReplaceTokens.push_back(*it);
+						it = tokens.erase(it);
+						break;
 					case TokenType::end:
+						if (data->removeDepth) {
+							data->removeDepth--;
+							data->curReplaceTokens.push_back(*it);
+							it = tokens.erase(it);
+							break;
+						}
 						data->state = State::normal;
 						data->replaceTable.insert({ data->curReplaceString, { data->curReplaceTokens, data->curMacroArgCount } });
 						data->curReplaceTokens.clear();
@@ -928,8 +1029,8 @@ namespace assembler {
 			preprocesserRemove.setTokens(tokens);
 		}
 		
-		inline int preprocessRem(functions::PreprocData& data) {
-			int code = preprocesserRemove.preprocess(functions::removeUnused, &data);
+		inline int preprocessRem(lexer::Token& errorTok, functions::PreprocData& data) {
+			int code = preprocesserRemove.preprocess(errorTok, functions::removeUnused, &data);
 			if (code) return code;
 
 			return (int)functions::PreprocessError::SUCCESS;
@@ -939,9 +1040,20 @@ namespace assembler {
 			preprocesserReplace.setTokens(tokens);
 		}
 
-		inline int preprocessRep(functions::PreprocData& data) {
-			int code = preprocesserReplace.preprocess(functions::handleReplace, &data);
+		inline int preprocessRep(lexer::Token& errorTok, functions::PreprocData& data) {
+			int code = preprocesserReplace.preprocess(errorTok, functions::handleReplace, &data);
 			if (code) return code;
+
+			// whole input consumed with a directive still open
+			if (!data.ifOpen.empty()) {
+				errorTok = data.ifOpen.back();
+				return (int)functions::PreprocessError::UNTERMINATED_IF;
+			}
+			if (data.state != functions::State::normal) {
+				errorTok = {};
+				errorTok.line = -1;
+				return (int)functions::PreprocessError::UNTERMINATED_DIRECTIVE;
+			}
 
 			return (int)functions::PreprocessError::SUCCESS;
 		}
@@ -1419,6 +1531,7 @@ namespace assembler {
 			{ { NT::expressionL0, AT::__epsilon, 1 }, { { TT::openparen, false, false }, { NT::expressionL13, true, true }, { TT::closeparen, false, false } } },
 			{ { NT::expressionL0, AT::__epsilon, 0 }, { { NT::number, false , false } } },
 			{ { NT::expressionL0, AT::__epsilon, 0 }, { { TT::identifier, false , false } } },
+			{ { NT::expressionL0, AT::__epsilon, 0 }, { { TT::curline, false , false } } },
 
 			{ { NT::number, AT::__epsilon, 0 }, { { TT::hexnum, false, false } } },
 			{ { NT::number, AT::__epsilon, 0 }, { { TT::decnum, false, false } } },
@@ -1549,12 +1662,12 @@ namespace assembler {
 
 			inline const char* evaluateErrorName(int code) {
 				switch ((EvaluateError)code) {
-				case EvaluateError::SUCCESS: return "SUCCESS";
-				case EvaluateError::MISSING_EXPRESSION: return "MISSING_EXPRESSION";
-				case EvaluateError::NEGATIVE_INDEX: return "NEGATIVE_INDEX";
-				case EvaluateError::NOT_CONSTANT: return "NOT_CONSTANT";
+				case EvaluateError::SUCCESS: return "success";
+				case EvaluateError::MISSING_EXPRESSION: return "missing expression";
+				case EvaluateError::NEGATIVE_INDEX: return "negative index";
+				case EvaluateError::NOT_CONSTANT: return "not constant";
 				}
-				return "UNKNOWN_ERROR";
+				return "unknown error";
 			}
 
 			std::unordered_map<size_t, s32> addCoeff(const std::unordered_map<size_t, s32>& a, const std::unordered_map<size_t, s32>& b) {
@@ -1616,6 +1729,10 @@ namespace assembler {
 				std::vector<Section> sections;
 				std::vector<std::vector<OperationToken>> operationVector;
 				std::vector<u32> compressionIndex;
+
+				int curLineCount;
+
+				_EvalData() : curLineCount(0) {}
 			} EvalData;
 
 			// Labels are mangled with the (output-binary-based) file name so that identically
@@ -1909,6 +2026,9 @@ namespace assembler {
 					case (u64)ASTNodeType::instruction_CTL + (u64)TokenType::__end:
 					case (u64)ASTNodeType::instruction_CACHE + (u64)TokenType::__end:
 					case (u64)ASTNodeType::label + (u64)TokenType::__end:
+					case (u64)ASTNodeType::allocate + (u64)TokenType::__end:
+					case (u64)ASTNodeType::allocate_zero + (u64)TokenType::__end:
+					case (u64)TokenType::curline:
 						data->sectioningArr.push_back(cur);
 						break;
 				}
@@ -2158,6 +2278,35 @@ namespace assembler {
 					break;
 				}
 
+				// $: address of the current instruction/data (section byte count before it).
+				// Each $ gets a hidden label "#curline#N" ('#' can't appear in a source identifier)
+				// so a relocated use (jmp $) has a symbol the linker can resolve.
+				case (u64)TokenType::curline: {
+					size_t section_id = data->sectionIdMap[cur];
+
+					std::string name = "#curline#" + std::to_string(data->curLineCount);
+					data->curLineCount++;
+
+					ExprData nData;
+					nData.type = ExprType::LINEAR;
+					nData.value = data->sectionByte[section_id];
+					nData.coeff[section_id] = 1;
+					nData.operations.push_back({ OperationType::IDENTIFIER, name });
+
+					data->idenifierValue[name] = nData;
+					data->expressionValue[cur] = nData;
+					break;
+				}
+
+				// name equ expr: the name takes a copy of the expression's value. If it can't be
+				// computed yet (forward-referenced label), evaluateCode retries it.
+				case (u64)ASTNodeType::equate + (u64)TokenType::__end: {
+					auto find = data->expressionValue.find(cur->child[0]);
+					if (find != data->expressionValue.end())
+						data->idenifierValue[cur->text] = find->second;
+					break;
+				}
+
 				case (u64)ASTNodeType::allocate + (u64)TokenType::__end: {
 					size_t section_id = data->sectionIdMap[cur];
 
@@ -2246,9 +2395,22 @@ namespace assembler {
 				u32 sectionId = data->sectionIdMap[cur];
 
 				switch (cur->type) {
+				case (u64)ASTNodeType::equate + (u64)TokenType::__end: {
+					if (data->idenifierValue.find(cur->text) != data->idenifierValue.end())
+						break;
+					auto find = data->expressionValue.find(cur->child[0]);
+					if (find == data->expressionValue.end())
+						return (int)EvaluateError::MISSING_EXPRESSION;
+					data->idenifierValue[cur->text] = find->second;
+					break;
+				}
+
 				case (u64)ASTNodeType::allocate + (u64)TokenType::__end: {
 					if (data->expressionValue.find(cur->child[1]) == data->expressionValue.end())
 						return (int)EvaluateError::MISSING_EXPRESSION;
+
+					// size in bytes; calculateAddr already required it to be CONSTANT
+					data->dataValue[cur].length = (u32)data->expressionValue[cur->child[0]].value;
 
 					ExprData& expr = data->expressionValue[cur->child[1]];
 					if (expr.type == ExprType::CONSTANT)
@@ -2257,13 +2419,14 @@ namespace assembler {
 						ReplaceData rep = {};
 						rep.index = data->operationVector.size();
 						rep.offset = 0;
-						rep.size = 32;
+						// never wider than the allocation itself, or the patch spills into the previous data
+						rep.size = (data->dataValue[cur].length < 4) ? data->dataValue[cur].length * 8 : 32;
 						data->dataValue[cur].data = 0;
 						data->dataValue[cur].replace.push_back(rep);
 						data->operationVector.push_back(expr.operations);
 					}
 
-					registerReplace(data, sectionId, data->dataValue[cur].replace, data->dataValue[cur].length/8);
+					registerReplace(data, sectionId, data->dataValue[cur].replace, data->dataValue[cur].length);
 					pushByteN(data->sections[sectionId].data, data->dataValue[cur].data, data->dataValue[cur].length);
 					break;
 				}
@@ -2570,7 +2733,7 @@ namespace assembler {
 		}
 	}
 
-	const unsigned long long version = 404;
+	const unsigned long long version = 405;
 
 	namespace cache {
 		using u64 = unsigned __int64;
@@ -3051,34 +3214,13 @@ namespace assembler {
 				tokenBackup.insert({it->line, *it});
 
 			preprocesser::setTokensRem(curTokens);
-			int code = preprocesser::preprocessRem(*preprocData);
+			lexer::Token remErrorTok = {};
+			int code = preprocesser::preprocessRem(remErrorTok, *preprocData);
 			if (code) return code;
 
 			tokOut = curTokens;
 			return (int)preprocesser::functions::PreprocessError::SUCCESS;
 		};
-
-		preprocesser::setTokensRem(tokens);
-		preprocessError = preprocesser::preprocessRem(preprocData);
-		preprocesser::setTokensRep(tokens);
-		preprocessError = preprocesser::preprocessRep(preprocData);
-
-		if (dump.flags & AssemblerDump::getToken) {
-			dump.tokens.reserve(tokenBackup.size());
-			for (auto it = tokenBackup.cbegin(); it != tokenBackup.cend(); ++it)
-				dump.tokens.push_back(it->second);
-		}
-
-		bool validPreprocess = preprocessError == 0;
-		dump.errorCode |= (validPreprocess) ? 0 : (int)AssemblerDump::FAIL_PREPROCESS;
-
-		if (dump.flags & AssemblerDump::getPreproc || !validPreprocess) {
-			dump.preprocTokens = tokens;
-		}
-
-		if (!validPreprocess) {
-			return -1;
-		}
 
 		// "error at <file> line <n>: <source line>" for a token tagged by tagLine()
 		auto describeLocation = [&](const Token& tok) {
@@ -3096,8 +3238,40 @@ namespace assembler {
 			return msg;
 		};
 
-		Parser::ASTNode* pAST;
 		Token errorTok = {};
+		preprocesser::setTokensRem(tokens);
+		preprocessError = preprocesser::preprocessRem(errorTok, preprocData);
+		if (!preprocessError) {
+			preprocesser::setTokensRep(tokens);
+			preprocessError = preprocesser::preprocessRep(errorTok, preprocData);
+		}
+
+		if (dump.flags & AssemblerDump::getToken) {
+			dump.tokens.reserve(tokenBackup.size());
+			for (auto it = tokenBackup.cbegin(); it != tokenBackup.cend(); ++it)
+				dump.tokens.push_back(it->second);
+		}
+
+		bool validPreprocess = preprocessError == 0;
+		dump.errorCode |= (validPreprocess) ? 0 : (int)AssemblerDump::FAIL_PREPROCESS;
+
+		if (dump.flags & AssemblerDump::getPreproc || !validPreprocess) {
+			dump.preprocTokens = tokens;
+		}
+
+		if (!validPreprocess) {
+			dump.errorMessage = describeLocation(errorTok);
+			dump.errorMessage += "\n ";
+			dump.errorMessage += preprocesser::functions::preprocessErrorName(preprocessError);
+			if (errorTok.line >= 0) {
+				dump.errorMessage += ": ";
+				dump.errorMessage += errorTok.text;
+			}
+			return -1;
+		}
+
+		Parser::ASTNode* pAST;
+		errorTok = {};
 		bool validParse = parser::parser.parse(errorTok, pAST, tokens);
 		dump.errorCode |= (validParse) ? 0 : (int)AssemblerDump::FAIL_PARSE;
 

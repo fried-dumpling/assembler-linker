@@ -947,8 +947,9 @@ namespace parser_generator {
 			tmpTok.line = -1;
 			if (tokenCount < inputs.size())
 				tmpTok = inputs[tokenCount];
-			else if (!inputs.empty()) {
-				tmpTok = inputs.back();
+			else {
+				if (!inputs.empty())
+					tmpTok = inputs.back();
 				tmpTok.text = "<EOF>";
 			}
 			errorToken = tmpTok;

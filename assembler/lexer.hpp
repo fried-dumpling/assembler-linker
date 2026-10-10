@@ -1386,7 +1386,10 @@ namespace lexer_generator {
 					goto createToken;
 
 				curString.push_back(*it);
-				state = this->dfaTable.table[state][*it];
+				// the DFA only has columns 0..127; a non-ASCII byte (UTF-8, negative as char) is
+				// looked up as 127 (DEL): matched by negated classes like [^\n] so it can sit in
+				// comments, and an unknown token anywhere else. The token text keeps the real byte.
+				state = this->dfaTable.table[state][((unsigned char)*it < 128) ? (unsigned char)*it : 127];
 
 				if (state == (ID)-1) {
 				createToken:

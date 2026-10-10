@@ -185,6 +185,8 @@ int main(int argc, char* argv[]) {
 		cout << "------------------------------------------------------------" << endl;
 		cout << "preproc->" << endl;
 		cout << (preprocOk ? "success" : "failed") << endl;
+		if (!preprocOk)
+			cout << dump.errorMessage << endl;
 		cout << "------------------------------------------------------------" << endl;
 	}
 

@@ -406,6 +406,30 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
     - `tokenBackup`을 `unordered_multimap`→`std::multimap`: 같은 줄 토큰이 역순으로 나와 소스 줄이 뒤집혀 출력되던 기존 버그 수정(`-token` 덤프 순서도 정렬됨).
     - 검증: bcdtodec → `line 134: st.zero gen[7].32B, bcdTest / MISSING_EXPRESSION: bcdTest`. 회귀 25/29 그대로.
 
+49. (2026-10-10) `DataValue::length` 미설정 수정: `evaluateCode`의 `allocate`가 `length`를 안 채워 `.data` 바이트가 0개로 나가던 문제(라벨 주소는 `sectionByte`로 따로 세서 맞았음). `length = child[0]`(바이트, CONSTANT 보장) 대입, `registerReplace`에 `length/8` 대신 `length`(바이트), 비상수 값의 `rep.size = min(32, length*8)`(4바이트 미만 allocate에서 32비트 패치가 앞 데이터를 덮던 문제 — `ptr: 4, v` 다음 `ptr2: 2, w`가 ptr 하위 2바이트를 0으로 덮음). 검증: add_terminal 496→672바이트, `ptr`/`ptr2`/1바이트 `b` 재배치 정확, 회귀 25/29 asm+link.
+    - (후속, 사용자 선택 B → 이후 사용자가 직접 A로 되돌림: 현재는 끝 기준 채우기) `pushByteN`을 시작 기준 채우기로 변경: size<=4는 하위 size바이트(빅엔디안, 기존 유지), size>4는 값을 앞에서부터 빅엔디안 반복하고 마지막 부분 워드는 잘림(`5, 0x11223344` → `11 22 33 44 11`; 이전엔 끝 기준이라 `44 11 22 33 44`로 라벨 첫 워드가 회전된 값이었음). 비상수 재배치 위치도 마지막 워드→**첫 워드**(`registerReplace`에 `min(length,4)`).
+    - 남은 것(미수정): 4바이트 초과 allocate의 비상수 값은 첫 워드에만 패치되고 나머지는 0, `allocate_zero`(.bss)는 바이트/크기를 전혀 직렬화 안 함, 4의 배수 아닌 크기 뒤 라벨들의 워드 비정렬.
+
+50. (2026-10-10) `equ`/`$` 평가 연결 + allocate 섹션 매핑 버그:
+    - **equate**: `calculateAddr`에서 식 값이 있으면 `idenifierValue[name]`에 ExprData 복사(없으면 skip, 에러X). `evaluateCode`에서 아직 없으면 재시도된 식 값으로 등록, 끝내 없으면 `MISSING_EXPRESSION`. 사용처는 식을 복사하므로 `K equ later+4`는 `later` 재배치로 처리됨. 한계: equ 정의보다 앞에서 쓰이고 + equ 식이 전방 라벨에 의존하면 사용처가 먼저 평가돼 실패.
+    - **`$`(curline)**: 문법 `expressionL0 -> curline` 추가(version 404→405). `calculateAddr`에서 현재 `sectionByte`(그 명령어/데이터 시작 위치)로 LINEAR(coeff{section:1}) ExprData 생성. 이후 사용자가 재배치 지원을 위해 `$`마다 숨은 라벨 `#curline#N`(`EvalData::curLineCount`)을 만들어 `idenifierValue`+`expressionValue` 양쪽에 저장하도록 변경 → 일반 라벨처럼 export/mangle돼 링커가 해석. 검증: `jmp $`, `$ + 8`, `.data`의 `v: 4, $`, `K equ $`, 같은 이름 `.text` 두 조각, 2파일 링크 전부 정확한 주소.
+    - **같이 고친 기존 버그**: `allocate`/`allocate_zero`가 `sectioningArr`에 없어 `sectionIdMap[cur]`가 기본값 0 → `.text` 다음 `.data`면 데이터 바이트/크기가 섹션 0(text)에 들어가 라벨 주소와 실제 위치가 어긋남. `calculateSection`에 allocate/allocate_zero/curline 추가.
+    - 검증: equ 상수/전방 라벨/미정의(에러 메시지), `$ - start`, `$ - v`(data), text→data 순서 전부 바이트 단위 확인. 회귀 25/29 asm+link, add_terminal 672바이트.
+
+51. (2026-10-10) `#ifdef`/`#ifndef` 테스트 + 버그 수정 + 전처리 에러 리포트(사용자가 1차 구현한 상태에서):
+    - 버그: ① `ifndef`가 `ifdef`로 fall-through하며 `invert=false`로 덮여 `#ifndef`가 `#ifdef`처럼 동작 ② 조건이 참이면 state가 `readIf`에 머물러 다음 토큰에서 `EXPECTED_IF_IDENTIFIER` ③ 참인 블록의 `#end`를 소비하는 곳이 없어 파서까지 감 ④ 제거 중인 블록 안의 중첩 `#ifdef`/`#macro`의 `#end`에서 제거가 끝나버림.
+    - 수정: `PreprocData::ifOpen`(열린 블록의 여는 토큰 스택, 에러 위치용) + `removeDepth`(제거 중 중첩 지시어 깊이). normal 상태의 `#end`는 `ifOpen`을 닫고, 비어 있으면 `UNEXPECTED_END`. `invert`/`uniqueCounter` 기본값 초기화(기존엔 미초기화).
+    - 에러: `UNEXPECTED_END`, `UNTERMINATED_IF`(입력 끝에 열린 블록 — 여는 `#ifdef` 위치 보고), `UNTERMINATED_DIRECTIVE`(입력 끝에 `#macro`/`#define`/매크로 호출 미완) + `preprocessErrorName()`. 제네릭 `Preprocesser::preprocess(errorToken, ...)`가 실패 시점 토큰을 돌려주고, `assemble()`이 `describeLocation`(전처리 앞으로 이동)으로 parse/eval과 같은 형식의 메시지 작성, `main.cpp`가 출력.
+    - 검증: ifdef/ifndef 참·거짓, 중첩(참/거짓 조합), 제거 블록 안 `#macro`, 참 블록 안 `#macro` 정의 후 호출, include guard(`#ifndef X #define X`)와 include 파일 간 guard, 에러 5종(위치 포함). 회귀 25/29 asm+link.
+    - (후속 요청) `readMacro_token`에서 `#ifdef`/`#ifndef`면 `removeDepth++`, `#end`면 `removeDepth>0`일 때 `--`하고 본문에 포함, `removeDepth==0`인 `#end`에서만 매크로 정의 종료(`readMacro_argCount`에서 0으로 리셋). 본문의 조건부는 **확장 시점**에 평가됨(`#define`이 두 호출 사이에 오면 두 번째 호출만 포함 확인). 한계: `#define`은 괄호로 묶지 않으면 토큰 1개만 받음(기존 동작).
+
+52. (2026-10-10) 배포 전 전체 점검(`-Wall -Wextra` + 기능 스윕 약 40케이스: 전방/후방 참조, 식 연산자, LINEAR/COMPLEX 재배치, text↔data 순서, bss, 이름 있는 섹션, 같은 이름 text 조각, `$`, equ, 매크로 인자/`##`고유 라벨, 중첩 define, 매크로 안 ifdef, include 정상/중복/자기자신/없는 파일/include 파일 안 에러, 에러 메시지 종류별, 빈 파일, 3파일 링크):
+    - **수정 1 (lexer)**: `lex()`가 DFA 테이블(열 0..127)을 부호 있는 `char`로 인덱싱 → UTF-8 바이트(≥0x80)가 음수 인덱스로 테이블 밖을 읽음(UB). 한글 주석이 있으면 어셈블 실패. 0x80 이상은 127(DEL)로 조회(`[^
+]` 같은 부정 클래스에 매치돼 주석 안에서는 허용, 코드에선 unknown 토큰), 토큰 text는 원래 바이트 유지.
+    - **수정 2 (parser)**: 빈 입력의 parse 에러 토큰이 빈 문자열 → `<EOF>`.
+    - 확인만 한 것: `run.txt`는 소스가 아니라 바이너리(실패가 정상). ram+ram2+ram3 링크가 108→260바이트인 건 49번으로 `.data`가 실제로 출력되기 때문(168+44+48). 경고 중 `for (it; ...)`류/`readInclude` 미처리 switch/미사용 변수는 동작 영향 없음.
+    - 남은 실패: parse 4(branch/factorial_norec/prime_old/texteditor, LALR/소스), eval 1(bcdtodec, 소스에 없는 라벨).
+
 ## 작업 방식 관련 주의사항
 
 - **빌드/테스트를 절대 자동으로 수행하지 말 것** — 사용자가 "아직 완성본 아니니까 빌드나 테스트까지는 하지 말고"라고 명시함. 명시적 요청이 있을 때만 수행.
