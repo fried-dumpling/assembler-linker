@@ -188,7 +188,7 @@ int main(int argc, char* argv[]) {
 		cout << "------------------------------------------------------------" << endl;
 	}
 
-	if (dumpEvaluate || dumpBinary || !parseOk) {
+	if (dumpEvaluate || dumpBinary || !parseOk || !evalOk) {
 		cout << "parse->" << endl;
 		cout << (parseOk ? "success" : "failed") << endl;
 		if (!parseOk)
@@ -200,6 +200,8 @@ int main(int argc, char* argv[]) {
 		if (parseOk) {
 			cout << "evaluate->" << endl;
 			cout << (evalOk ? "success" : "failed") << endl;
+			if (!evalOk)
+				cout << dump.errorMessage << endl;
 			cout << "------------------------------------------------------------" << endl;
 		}
 	}

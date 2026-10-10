@@ -146,10 +146,10 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
 
 ### 드라이버 (`evaluate()`)
 
-전방 라벨 참조를 지원하기 위해 `calculateConst`를 두 번 호출:
-1. 1차: 라벨을 best-effort로 정의 (전방 참조는 조용히 skip)
-2. 섹션 바이트 오프셋 재계산(`bssByte`/`dataByte`/`textByte` 재배치)
-3. 2차: 모든 식별자가 해소된 상태로 재평가
+(2026-10-10 갱신 — 47번 참고) `calculateSection` → `calculateAddr`(구 `calculateConst`) → `evaluateCode` → `collapseExpr`. 표현식 처리(연산자/리터럴/identifier/index)는 공용 함수 `calculateExpr`로 분리돼 있고 두 곳에서 호출됨:
+1. `calculateAddr`: `calculateExpr` 후 주소 관련 case(instruction 바이트 증가, label 정의, allocate 크기). 전방 참조 식별자/그걸 포함한 식은 조용히 skip(에러 아님).
+2. `evaluateCode`: 노드의 `expressionValue`가 아직 없으면 `calculateExpr`를 다시 호출 — 이 시점엔 모든 라벨이 `idenifierValue`에 있으므로 전방 참조가 해소됨. 값이 끝내 없으면 소비자(`immidate16`/`immidate8`/`reg_index`/`allocate`)가 `MISSING_EXPRESSION` 반환.
+- 라벨 주소는 instruction(고정 4바이트)과 allocate 크기(반드시 CONSTANT, 전방 참조 불가)로만 정해지므로 `calculateAddr` 1회로 확정됨 — 그래서 별도의 2차 주소 패스가 필요 없음.
 
 ## 알려진 미해결/범위 밖 이슈 (건드리지 말 것 — 사용자가 명시적으로 범위 밖이라 함)
 
@@ -391,6 +391,20 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
     - **최종 end-to-end 스모크 테스트**: 배포된 `dasm.exe`로 라벨을 각자 갖는 서로 다른 소스 2개(`f1.txt`/`f2.txt`, 각각 `addi`)를 조립 → 둘 다 parse/evaluate 성공 → 배포된 `dlnk.exe`로 두 오브젝트를 링크 → 8바이트 바이너리 정상 생성 확인(테스트 파일은 전부 `bin/scratch_test/`에 만들고 끝나고 삭제, 저장소 바깥 산출물엔 안 남음).
 
 46. (2026-10-10) "assembler-linker/test 폴더 만들어서 program, out폴더 옮겨줘" — `assembler-linker/` 루트에 `test/` 신설, `assembler/program/`(git-tracked 테스트 소스 31개)은 `git mv`로 `test/program/`으로(rename으로 인식되어 히스토리 보존), `build/out/`(세션 중 쌓인 untracked 테스트 산출물)은 `test/out/`으로 일반 `mv`. 두 경로 모두 빌드 스크립트(`build-asm.cmd`/`build-lnk.cmd`)나 소스(`main.cpp`/`*.hpp`) 어디에도 하드코딩 참조가 없음을 먼저 grep으로 확인한 뒤 이동(참조가 있었다면 같이 고쳐야 했을 것). 디렉토리 구조 섹션도 갱신.
+
+47. (2026-10-10) "evaluateCode안에 calculateAddr(구calculateConst)의 identifier, expression처리 등 addr이외의 const처리를 복사해서 evaluateCode에서 unresolved된 identifier/expression 처리하게 해줘" — 직전 분석(add_terminal이 `call zero.32B, func_getInput`의 전방 참조에서 `MISSING_EXPRESSION`) 후속:
+    - **전방 참조 해소**: 사용자가 `calculateConst`를 `calculateAddr`로 이름 바꿔둔 상태. 복붙 대신 표현식 case들(연산자/리터럴/identifier/index)을 공용 함수 `calculateExpr(cur, data)`로 분리해 `calculateAddr`와 `evaluateCode` 양쪽에서 호출(로직이 두 벌로 갈라지지 않게). `calculateExpr`는 피연산자가 없으면 에러 대신 skip(binaryOp/unaryOp/단항+의 `MISSING_EXPRESSION` 반환 제거) — `evaluateCode`는 `expressionValue`에 없는 노드만 재시도, 끝내 못 푼 값은 소비자(`immidate16` 등)가 `MISSING_EXPRESSION`으로 보고. `allocate` 크기 식은 주소를 결정하므로 `calculateAddr`에서 여전히 CONSTANT 필수.
+    - **같이 고친 기존 버그 1 (`collapseExpr` 중복 판정)**: `EqualOperation`/`HashOperation`이 `type`/`value`만 비교하고 `text`를 무시 — `IDENTIFIER` 토큰은 전부 `value=0`이라 `[ID a]`와 `[ID b]`가 같은 식으로 판정돼, 서로 다른 라벨 참조가 전부 첫 번째 라벨 주소로 패치되고 있었음(전방/후방 무관 — `a:`,`b:` 정의 후 `jmp a`,`jmp b`가 둘 다 a로 감). `text`도 비교/해시하도록 수정.
+    - **같이 고친 기존 버그 2 (`formatData`의 `exprIndex`)**: `nMap.exprIndex = si->second.index`가 raw `operationVector` 인덱스를 썼는데 `format.expressions`는 중복을 건너뛴 압축 목록이라 인덱스가 어긋남(링커가 `exprIndex >= expressions.size()`로 실패). 버그 1 때문에 모든 단일 라벨 식이 인덱스 0으로 뭉쳐서 지금까지 드러나지 않았음. `data.compressionIndex[...]`로 변환하도록 수정.
+    - **검증**: 최소 반례(후방/전방 참조 각 2라벨) 링크 결과가 정확한 주소(0/4, 8/12)로 패치됨. `add_terminal` 링크 결과를 손으로 검산 — `func_getInput`=120(앞 명령어 30개), `func_convertInt`=260, `numA`=576(text 496 + data 80), `stackEnd`=672 전부 일치. `test/program` 29개: eval 성공 13→25개, 25개 전부 단독 링크까지 성공. 남은 실패 5개는 기존 문제(parse 실패 4: branch/factorial_norec/prime_old/texteditor, eval 실패 1: bcdtodec — 미조사).
+
+48. (2026-10-10) eval 실패 시 위치/토큰/에러 이름 리포트 + AST 소스 토큰 정리:
+    - AST 소스 토큰: 사용자가 추가한 `pSrcToken`(포인터)을 이후 요청으로 **값 복사 `ASTNode::srcToken`**으로 바꿈(기본 생성 시 line=-1). 값은 **리듀스 시 가장 왼쪽 심볼의 토큰**(bison `@$ = @1`) — 이전엔 nodeIndex 자식 또는 스택 top(=가장 오른쪽)이라 노드마다 기준이 달랐음. `parse()`는 `inputs`(const, 호출자 벡터)에 `__eot`를 push하지 않고 가상의 `eotToken`을 lookahead로 씀.
+    - parse 에러 토큰은 `inputs[tokenCount]`(실제로 걸린 lookahead), 입력 끝이면 마지막 토큰 위치에 text `<EOF>`.
+    - `Evaluator::evaluate(errorToken, ...)`가 실패 노드의 `srcToken`을 복사. `evaluator::evaluate`는 `errorTok`를 참조로 받음(이전엔 값 복사라 전달 안 됨). `evaluateErrorName(code)` 추가.
+    - `assemble()`의 `describeLocation(tok)` 람다를 parse/eval 에러 메시지가 공유: `error at <file> line <fileLine>: <소스 줄>` + parse는 `unexpected token: ..`, eval은 `<ERROR_NAME>: <token>`. 위치는 토큰 자체의 `fileId`/`fileLine` 사용. `main.cpp`가 eval 실패 시 메시지 출력.
+    - `tokenBackup`을 `unordered_multimap`→`std::multimap`: 같은 줄 토큰이 역순으로 나와 소스 줄이 뒤집혀 출력되던 기존 버그 수정(`-token` 덤프 순서도 정렬됨).
+    - 검증: bcdtodec → `line 134: st.zero gen[7].32B, bcdTest / MISSING_EXPRESSION: bcdTest`. 회귀 25/29 그대로.
 
 ## 작업 방식 관련 주의사항
 

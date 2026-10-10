@@ -19,22 +19,20 @@
 #include "parser.hpp"
 
 namespace evaluator_generator {
-	using namespace lexer_generator;
-	using namespace parser_generator;
-
 	template <typename Terminal, typename NonTerminal, typename ASTElement>
 	class Evaluator {
 	private:
 		using u32 = unsigned __int32;
 		using u64 = unsigned __int64;
-		using Element = convert::Element;
+		using Element = parser_generator::convert::Element;
 
-		using AST = typename Parser<Terminal, NonTerminal, ASTElement>::ASTNode;
+		using AST = typename parser_generator::Parser<Terminal, NonTerminal, ASTElement>::ASTNode;
 
 		AST* tree;
 	public:
+		using Token = typename parser_generator::Parser<Terminal, NonTerminal, ASTElement>::Token;
+
 		typedef int(*EvaluateFunction)(AST*, void*);
-		typedef int(*TBEvaluateFunction)(std::vector<AST*>&, AST*, void*);
 
 		Evaluator() {
 			this->tree = NULL;
@@ -44,7 +42,7 @@ namespace evaluator_generator {
 			this->tree = tree;
 		}
 
-		int evaluate(EvaluateFunction function, void* data) {
+		int evaluate(Token& errorToken, EvaluateFunction function, void* data) {
 			std::vector<AST*> orderVec;
 			std::stack<AST*> stack;
 			stack.push(this->tree);
@@ -56,11 +54,18 @@ namespace evaluator_generator {
 			}
 			for (auto it = orderVec.rbegin(); it != orderVec.rend(); ++it) {
 				int code = function(*it, data);
-				if (code) return code;
+				if (code) {
+					errorToken = (*it)->srcToken;
+					return code;
+				}
 			}
+			errorToken.line = -1;
 			return 0;
 		}
 
+		//legacy, unused code
+		/*
+		typedef int(*TBEvaluateFunction)(std::vector<AST*>&, AST*, void*);
 		int evaluateTB(TBEvaluateFunction function, void* data) {
 			std::stack<AST*> stack;
 			stack.push(this->tree);
@@ -73,7 +78,7 @@ namespace evaluator_generator {
 					stack.push(*it);
 			}
 			return 0;
-		}
+		}*/
 	};
 }
 

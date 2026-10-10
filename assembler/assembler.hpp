@@ -869,7 +869,7 @@ namespace assembler {
 		// multi-file token stream (see tagLine() above), so backupTokens - the pre-preprocessing
 		// token list, which still has every line intact - always has at least one token carrying
 		// it. Returns false if absLine isn't present (e.g. out of range).
-		inline bool resolveSourceLocation(const std::unordered_multimap<int, lexer::Token>& backupTokens, int absLine, int& fileId, int& fileLine) {
+		inline bool resolveSourceLocation(const std::multimap<int, lexer::Token>& backupTokens, int absLine, int& fileId, int& fileLine) {
 			auto it = backupTokens.find(absLine);
 			if (it != backupTokens.end()) {
 				fileId = it->second.fileId;
@@ -1496,7 +1496,7 @@ namespace assembler {
 					size_t h = 0;
 					for (auto it = k.cbegin(); it != k.cend(); ++it) {
 						size_t h1 = std::hash<OperationType>()(it->type);
-						size_t h2 = std::hash<s32>()(it->value);
+						size_t h2 = std::hash<s32>()(it->value) ^ std::hash<std::string>()(it->text);
 						size_t h3 = h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
 						h <<= 1;
 						h += h3;
@@ -1512,7 +1512,9 @@ namespace assembler {
 					auto ai = A.cbegin();
 					auto bi = B.cbegin();
 					while (ai != A.cend()) {
-						if (ai->value != bi->value || ai->type != bi->type)
+						// text matters: IDENTIFIER tokens all carry value 0, so without it every
+						// single-label expression would collapse into the first one seen
+						if (ai->value != bi->value || ai->type != bi->type || ai->text != bi->text)
 							return false;
 						++ai;
 						++bi;
@@ -1544,6 +1546,16 @@ namespace assembler {
 				NEGATIVE_INDEX,      // index[...] evaluated to a negative constant
 				NOT_CONSTANT         // a size/length expression (allocate, allocate_zero) must fold to a constant
 			};
+
+			inline const char* evaluateErrorName(int code) {
+				switch ((EvaluateError)code) {
+				case EvaluateError::SUCCESS: return "SUCCESS";
+				case EvaluateError::MISSING_EXPRESSION: return "MISSING_EXPRESSION";
+				case EvaluateError::NEGATIVE_INDEX: return "NEGATIVE_INDEX";
+				case EvaluateError::NOT_CONSTANT: return "NOT_CONSTANT";
+				}
+				return "UNKNOWN_ERROR";
+			}
 
 			std::unordered_map<size_t, s32> addCoeff(const std::unordered_map<size_t, s32>& a, const std::unordered_map<size_t, s32>& b) {
 				std::unordered_map<size_t, s32> result = a;
@@ -2002,9 +2014,11 @@ namespace assembler {
 				return r;
 			}
 
-			int calculateConst(AST* cur, void* vpData) {
-				EvalData* data = (EvalData*)vpData;
-
+			// Expression nodes only (operators, literals, identifiers, index). A node whose operands
+			// aren't resolved yet (forward-referenced label) is skipped, not an error: calculateAddr
+			// runs before every label is defined, and evaluateCode retries it once they all are.
+			// Whoever consumes the value (immidate16/allocate/...) reports MISSING_EXPRESSION.
+			int calculateExpr(AST* cur, EvalData* data) {
 				bool child1exp = (cur->child.size() >= 1) ? data->expressionValue.find(cur->child[0]) != data->expressionValue.end() : false;
 				bool child2exp = (cur->child.size() >= 2) ? data->expressionValue.find(cur->child[1]) != data->expressionValue.end() : false;
 				bool child3exp = (cur->child.size() >= 3) ? data->expressionValue.find(cur->child[2]) != data->expressionValue.end() : false;
@@ -2024,7 +2038,6 @@ namespace assembler {
 				case (u64)TokenType::plus:
 					if (cur->child.size() == 1) {
 						if (child1exp) data->expressionValue[cur] = data->expressionValue[cur->child[0]];
-						else return (int)EvaluateError::MISSING_EXPRESSION;
 						break;
 					}
 					operationType = OperationType::ADD; operationText = "+"; function = [](s32 a, s32 b) { return a + b; }; linearKind = LinearKind::ADD_LIKE; goto binaryOp;
@@ -2049,8 +2062,6 @@ namespace assembler {
 				binaryOp:
 					if (child1exp && child2exp)
 						data->expressionValue[cur] = combineBinary(data->expressionValue[cur->child[0]], data->expressionValue[cur->child[1]], operationType, operationText, function, linearKind);
-					else
-						return (int)EvaluateError::MISSING_EXPRESSION;
 					break;
 
 				case (u64)TokenType::tilde: operationType = OperationType::BNT; operationText = "~"; unaryFunction = [](s32 a) { return ~a; }; linearKind = LinearKind::NONE; goto unaryOp;
@@ -2059,8 +2070,6 @@ namespace assembler {
 				unaryOp:
 					if (child1exp)
 						data->expressionValue[cur] = combineUnary(data->expressionValue[cur->child[0]], operationType, operationText, unaryFunction, linearKind);
-					else
-						return (int)EvaluateError::MISSING_EXPRESSION;
 					break;
 
 				case (u64)TokenType::selector: {
@@ -2106,7 +2115,18 @@ namespace assembler {
 						data->expressionValue[cur] = data->expressionValue[cur->child[0]];
 					}
 					break;
+				}
 
+				return (int)EvaluateError::SUCCESS;
+			}
+
+			int calculateAddr(AST* cur, void* vpData) {
+				EvalData* data = (EvalData*)vpData;
+
+				int code = calculateExpr(cur, data);
+				if (code) return code;
+
+				switch (cur->type) {
 				case (u64)ASTNodeType::instruction_N + (u64)TokenType::__end:
 				case (u64)ASTNodeType::instruction_R + (u64)TokenType::__end:
 				case (u64)ASTNodeType::instruction_RI + (u64)TokenType::__end:
@@ -2215,6 +2235,14 @@ namespace assembler {
 
 			int evaluateCode(AST* cur, void* vpData) {
 				EvalData* data = (EvalData*)vpData;
+
+				// every label is in idenifierValue by now, so retry expressions calculateAddr had
+				// to skip; children are visited first, so a parent sees its retried operands.
+				if (data->expressionValue.find(cur) == data->expressionValue.end()) {
+					int code = calculateExpr(cur, data);
+					if (code) return code;
+				}
+
 				u32 sectionId = data->sectionIdMap[cur];
 
 				switch (cur->type) {
@@ -2420,15 +2448,20 @@ namespace assembler {
 			evaluator.setTree(tree);
 		}
 
-		inline int evaluate(functions::EvalData& data) {
-			int code = evaluator.evaluate(functions::calculateSection, &data);
+		// on failure errorTok is the first source token of the failing node (line = -1 if none)
+		inline int evaluate(lexer::Token& errorTok, functions::EvalData& data) {
+			int code = evaluator.evaluate(errorTok, functions::calculateSection, &data);
 			if (code) return code;
-			code = evaluator.evaluate(functions::calculateConst, &data);
+			code = evaluator.evaluate(errorTok, functions::calculateAddr, &data);
 			if (code) return code;
-			code = evaluator.evaluate(functions::evaluateCode, &data);
+			code = evaluator.evaluate(errorTok, functions::evaluateCode, &data);
 			if (code) return code;
 			code = functions::collapseExpr(&data);
-			if (code) return code;
+			if (code) {
+				errorTok = {};
+				errorTok.line = -1;
+				return code;
+			}
 
 			return (int)functions::EvaluateError::SUCCESS;
 		}
@@ -2513,7 +2546,9 @@ namespace assembler {
 					nMap.byteIndex = base + si->first;
 					nMap.offset = si->second.offset;
 					nMap.size = si->second.size;
-					nMap.exprIndex = si->second.index;
+					// index is into the raw operationVector; format.expressions skips duplicates,
+					// so translate to the position in that compacted list
+					nMap.exprIndex = data.compressionIndex[si->second.index];
 
 					format.mapper.push_back(nMap);
 				}
@@ -2957,7 +2992,8 @@ namespace assembler {
 
 		
 		std::vector<Token> tokens;
-		std::unordered_multimap<int, Token> tokenBackup;
+		// ordered multimap: equal keys keep insertion order, so a line's tokens read back in source order
+		std::multimap<int, Token> tokenBackup;
 		std::vector<std::string> includedFiles = { preprocesser::normalizePath(fileName) };
 		int line = 0;
 		int fileId = 0;
@@ -2975,7 +3011,6 @@ namespace assembler {
 		// afterward would never reach them, leaving .line/.fileLine/.fileId uninitialized there.
 		lexer::lexer.lex(tokens, text);
 		line = preprocesser::tagLine(tokens);
-		tokenBackup.reserve(tokenBackup.size() + tokens.size());
 		for (auto it = tokens.begin(); it != tokens.end(); ++it) 
 			tokenBackup.insert({it->line, *it});
 
@@ -3045,9 +3080,25 @@ namespace assembler {
 			return -1;
 		}
 
+		// "error at <file> line <n>: <source line>" for a token tagged by tagLine()
+		auto describeLocation = [&](const Token& tok) {
+			std::string msg = "error at ";
+			if (tok.line < 0)
+				return msg + includedFiles[0] + ": ";
+			msg += (tok.fileId >= 0 && tok.fileId < (int)includedFiles.size()) ? includedFiles[tok.fileId] : std::to_string(tok.fileId);
+			msg += " line ";
+			msg += std::to_string(tok.fileLine);
+			msg += ": ";
+			auto range = tokenBackup.equal_range(tok.line);
+			for (auto it = range.first; it != range.second; ++it)
+				if (it->second.type != TokenType::newline)
+					msg += it->second.text;
+			return msg;
+		};
+
 		Parser::ASTNode* pAST;
-		int errorLine = 0;
-		bool validParse = parser::parser.parse(pAST, &errorLine, tokens);
+		Token errorTok = {};
+		bool validParse = parser::parser.parse(errorTok, pAST, tokens);
 		dump.errorCode |= (validParse) ? 0 : (int)AssemblerDump::FAIL_PARSE;
 
 		if (dump.flags & AssemblerDump::getAST || !validParse) {
@@ -3056,28 +3107,9 @@ namespace assembler {
 
 		if (dump.flags & AssemblerDump::getEval || !validParse) {
 			if (!validParse) {
-				int errFileId = 0, errFileLine = 0;
-				if (preprocesser::resolveSourceLocation(tokenBackup, errorLine, errFileId, errFileLine)) {
-					dump.errorMessage = "error at ";
-					dump.errorMessage += (errFileId >= 0 && errFileId < (int)includedFiles.size()) ? includedFiles[errFileId] : std::to_string(errFileId);
-					dump.errorMessage += " line ";
-					dump.errorMessage += std::to_string(errFileLine);
-				}
-				else {
-					dump.errorMessage = "error at absline ";
-					dump.errorMessage += std::to_string(errorLine);
-				}
-				dump.errorMessage += ": ";
-				auto range = tokenBackup.equal_range(errorLine);
-				for (auto it = range.first; it != range.second; ++it)
-					dump.errorMessage += it->second.text;
-
-				dump.errorMessage += "\nunexpected token: ";
-				// pAST here is the parser's partial/error node, not a normal reduced node -- it can
-				// legitimately have zero children (e.g. the error occurs on the very first token,
-				// before any reduction happened), so indexing child[0] unconditionally segfaults.
-				if (!pAST->child.empty())
-					dump.errorMessage += pAST->child[0]->text;
+				dump.errorMessage = describeLocation(errorTok);
+				dump.errorMessage += "\n unexpected token: ";
+				dump.errorMessage += errorTok.text;
 			}
 		}
 
@@ -3089,11 +3121,16 @@ namespace assembler {
 		evaluator::functions::EvalData data;
 		data.fileName = outputMangle;
 		evaluator::setTree(pAST);
-		int evaluateError = evaluator::evaluate(data);
+		int evaluateError = evaluator::evaluate(errorTok, data);
 		bool validEvaluate = evaluateError == 0;
 		dump.errorCode |= (validEvaluate) ? 0 : (int)AssemblerDump::FAIL_EVALUATE;
 
 		if (!validEvaluate) {
+			dump.errorMessage = describeLocation(errorTok);
+			dump.errorMessage += "\n ";
+			dump.errorMessage += evaluator::functions::evaluateErrorName(evaluateError);
+			dump.errorMessage += ": ";
+			dump.errorMessage += errorTok.text;
 			parser::parser.delAST(pAST);
 			return -1;
 		}
