@@ -40,7 +40,8 @@ namespace preproccesser_generator {
 			return this->tokens->begin();
 		}
 
-		int preprocess(Iter it, PreprocessFunction function, void* data) {
+		int preprocess(PreprocessFunction function, void* data) {
+			auto it = this->tokens->begin();
 			for (; it != this->tokens->end(); ) {
 				int code = function(*this->tokens, it, data);
 				if (code) return code;

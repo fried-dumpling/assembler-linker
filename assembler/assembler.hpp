@@ -553,11 +553,8 @@ namespace assembler {
 				readMacro_token,
 
 				readInclude,
-				resumeInclude,
 
-				replace_getArg,
-				replace_comma,
-				replace
+				replace_identifier
 			};
 
 			// PreprocessFunction return codes: 0 = success, anything else is propagated
@@ -569,8 +566,7 @@ namespace assembler {
 				EXPECTED_MACRO_IDENTIFIER,  // #macro not followed by an identifier
 				EXPECTED_MACRO_ARGCOUNT,     // #macro identifier not followed by a decimal arg count
 				INVALID_INCLUDE_PATH,	// #include<...>'s path is not valid
-				DUPLICATE_INCLUDE,     // #include<...> resolves to a file already included (catches cycles too)
-				INCLUDE_REQUEST
+				DUPLICATE_INCLUDE     // #include<...> resolves to a file already included (catches cycles too)
 			};
 
 			typedef struct _PreprocData {
@@ -585,29 +581,66 @@ namespace assembler {
 				std::vector<Token> curArg;
 				std::vector<std::vector<Token>> args;
 				int remainingArg;
-
+				
 				std::vector<Token> replaceTokens;
+				std::string fileName;
+				std::unordered_set<std::string> includedFiles;
 
 				int uniqueCounter;
-
-				std::string includePath;
-				std::vector<Token>::iterator resumeBeg;
-				// Count of not-yet-visited tokens from the spliced-in included block, rather than
-				// an end iterator: as removeUnused erases whitespace/newline/comment tokens inside
-				// that block, any iterator computed up front (resumeBeg + curToken.size()) goes
-				// stale (points at the wrong slot once the vector shrinks). A countdown that's
-				// decremented once per visited original slot, erased or not, lands exactly on the
-				// stale #include<...> token when it hits 0, regardless of how much got erased.
-				int resumeRemaining;
 			} PreprocData;
 
-			typedef int()();
+			template<class FuncSig> class FunctionRef;
+
+			// Despite the name (kept as-is), this OWNS a heap copy of whatever callable it's given
+			// rather than just referencing it -- it's assigned a temporary lambda (see
+			// includeCallback below), which only lives through the end of that one statement, so a
+			// non-owning reference would dangle the moment the assignment completes. Copy ctor/
+			// assignment are deleted rather than given shallow-copy semantics, since a shallow copy
+			// of an owning pointer would double-free on destruction; nothing currently copies a
+			// FunctionRef, only assigns a callable into one.
+			template<class Ret, class... Arg>
+			class FunctionRef<Ret(Arg...)> {
+			private:
+				void* object;
+				Ret(*call)(void*, Arg...);
+				void(*deleter)(void*);
+
+				void reset() {
+					if (deleter) deleter(object);
+					object = NULL;
+					call = NULL;
+					deleter = NULL;
+				}
+
+			public:
+				FunctionRef(void) : object(NULL), call(NULL), deleter(NULL) {}
+
+				FunctionRef(const FunctionRef&) = delete;
+				FunctionRef& operator=(const FunctionRef&) = delete;
+
+				~FunctionRef() { reset(); }
+
+				template<class Func>
+				FunctionRef& operator=(const Func& func) {
+					reset();
+					object = new Func(func);
+					call = [](void* obj, Arg... arg) -> Ret { return (*(Func*)obj)(arg...); };
+					deleter = [](void* obj) { delete (Func*)obj; };
+					return *this;
+				}
+
+				Ret operator()(Arg... arg) const {
+					return call(object, arg...);
+				}
+			};
+
+			FunctionRef<int(std::vector<lexer::Token>&, std::string, PreprocData*)> includeCallback;
 
 			int handleReplace(Vec tokens, Iter it, void* vpdata) {
 				PreprocData* data = (PreprocData*)vpdata;
 
 				switch (data->state) {
-				case State::replace_getArg:
+				case State::replace_identifier:
 					switch (it->type) {
 					case TokenType::comma:
 						if (data->depth == 1) {
@@ -665,12 +698,7 @@ namespace assembler {
 						data->uniqueCounter++;
 						it = tokens.insert(it, data->replaceTokens.begin(), data->replaceTokens.end());
 						data->state = State::normal;
-						return (int)PreprocessError::SUCCESS;
 					}
-					break;
-				
-				case State::resumeInclude:
-					data->state = State::normal;
 					break;
 
 				case State::normal:
@@ -699,7 +727,7 @@ namespace assembler {
 							break;
 						}
 
-						data->state = State::replace_getArg;
+						data->state = State::replace_identifier;
 						data->replaceTokens = find->second.first;
 						data->remainingArg = find->second.second;
 						data->args.clear();
@@ -712,8 +740,21 @@ namespace assembler {
 						std::string path = "";
 						if (!includePath(path, it->text))
 							return (int)PreprocessError::INVALID_INCLUDE_PATH;
-						data->includePath = path;
-						return (int)PreprocessError::INCLUDE_REQUEST;
+						int code = includeCallback(data->replaceTokens, path, data);
+						if (code) return code;
+
+						// erase and splice in the SAME call (state stays normal): if the
+						// #include<...> happened to be the last token in the (possibly shrunk)
+						// vector, erase() would return end(), and the generic preprocess loop's
+						// `it != tokens->end()` check would exit immediately -- a deferred
+						// "insert on the next call" would then never run, silently dropping the
+						// whole included file's content. Doing both here means `it` always ends
+						// up on the first inserted token (or wherever came after, if the include
+						// resolved to nothing), so nested #include/#define within it still get
+						// picked up by the same ongoing pass.
+						it = tokens.erase(it);
+						it = tokens.insert(it, data->replaceTokens.begin(), data->replaceTokens.end());
+						break;
 					}
 
 					default:
@@ -793,33 +834,16 @@ namespace assembler {
 			}
 
 			int removeUnused(Vec tokens, Iter it, void* vpdata) {
-				PreprocData* data = (PreprocData*)vpdata;
-				switch (data->state) {
-				case State::resumeInclude:
-					if (data->resumeRemaining == 0) {
-						// every original slot of the spliced-in included block has been visited
-						// (erased or not) -- `it` now sits exactly on the stale #include<...> token
-						// it was inserted in front of (see insertInclude()). Drop it and fall back
-						// to normal processing for the rest of the document.
-						it = tokens.erase(it);
-						data->state = State::normal;
-						break;
-					}
-					// still inside the freshly-spliced-in included tokens -- strip them like any
-					// other token (fallthrough), counting this slot as visited.
-					data->resumeRemaining--;
-				case State::normal:
-					switch (it->type) {
-					case TokenType::whitespace:
-					case TokenType::newline:
-					case TokenType::comment:
-						it = tokens.erase(it);
-						break;
+				switch (it->type) {
+				case TokenType::whitespace:
+				case TokenType::newline:
+				case TokenType::comment:
+					it = tokens.erase(it);
+					break;
 
-					default:
-						it++;
-						break;
-					}
+				default:
+					it++;
+					break;
 				}
 
 				return (int)PreprocessError::SUCCESS;
@@ -845,13 +869,12 @@ namespace assembler {
 		// multi-file token stream (see tagLine() above), so backupTokens - the pre-preprocessing
 		// token list, which still has every line intact - always has at least one token carrying
 		// it. Returns false if absLine isn't present (e.g. out of range).
-		inline bool resolveSourceLocation(const std::vector<lexer::Token>& backupTokens, int absLine, int& fileId, int& fileLine) {
-			for (auto it = backupTokens.cbegin(); it != backupTokens.cend(); ++it) {
-				if (it->line == absLine) {
-					fileId = it->fileId;
-					fileLine = it->fileLine;
-					return true;
-				}
+		inline bool resolveSourceLocation(const std::unordered_multimap<int, lexer::Token>& backupTokens, int absLine, int& fileId, int& fileLine) {
+			auto it = backupTokens.find(absLine);
+			if (it != backupTokens.end()) {
+				fileId = it->second.fileId;
+				fileLine = it->second.fileLine;
+				return true;
 			}
 			return false;
 		}
@@ -898,36 +921,26 @@ namespace assembler {
 			return result;
 		}
 
-		inline void insertInclude(std::vector<lexer::Token>& token, const std::vector<lexer::Token>& curToken, functions::PreprocData& data) {
-			data.resumeBeg = token.insert(data.resumeBeg, curToken.cbegin(), curToken.cend());
-			data.resumeRemaining = (int)curToken.size();
-			data.state = functions::State::resumeInclude;
+		Preprocesser preprocesserRemove;
+		Preprocesser preprocesserReplace;
+
+		inline void setTokensRem(std::vector<lexer::Token>& tokens) {
+			preprocesserRemove.setTokens(tokens);
 		}
-
-		Preprocesser preprocesser;
-
-		inline void setTokens(std::vector<lexer::Token>& tokens) {
-			preprocesser.setTokens(tokens);
-		}
-
-		inline int preprocess(functions::PreprocData& data) {
-			auto beg = preprocesser.begin();
-
-			if (data.state == functions::State::resumeInclude) {
-				beg = data.resumeBeg;
-			} else {
-				data.state = functions::State::normal;
-				data.depth = 0;
-				data.uniqueCounter = 0;
-			}
-			
-			auto it = beg;
-			int code = preprocesser.preprocess(it, functions::removeUnused, &data);
+		
+		inline int preprocessRem(functions::PreprocData& data) {
+			int code = preprocesserRemove.preprocess(functions::removeUnused, &data);
 			if (code) return code;
 
-			it = beg;
-			code = preprocesser.preprocess(it, functions::handleReplace, &data);
-			data.resumeBeg = it;
+			return (int)functions::PreprocessError::SUCCESS;
+		}
+
+		inline void setTokensRep(std::vector<lexer::Token>& tokens) {
+			preprocesserReplace.setTokens(tokens);
+		}
+
+		inline int preprocessRep(functions::PreprocData& data) {
+			int code = preprocesserReplace.preprocess(functions::handleReplace, &data);
 			if (code) return code;
 
 			return (int)functions::PreprocessError::SUCCESS;
@@ -2900,19 +2913,32 @@ namespace assembler {
 	}
 
 	typedef struct _AssemblerDump {
-		enum flag {
-			none = 0,
-			getToken = 1 << 0,
-			getPreproc = 1 << 1,
-			getParse = 1 << 2,
-			getAST = 1 << 3,
-			getEval = 1 << 4,
-			getBin = 1 << 5
+		// each flag must be a distinct bit -- chaining "X << 1" starting from a base of 0
+		// (as this used to do) leaves every subsequent value at 0 too (0 << 1 is still 0),
+		// so every flag ends up indistinguishable from "none"/"SUCCESS" and all the
+		// `dump.flags & getX` / `dump.errorCode & FAIL_X` checks silently never match.
+		enum AssemblerError {
+			SUCCESS = 0,
+			FAIL_LEX = 1,
+			FAIL_PREPROCESS = FAIL_LEX << 1,
+			FAIL_PARSE = FAIL_PREPROCESS << 1,
+			FAIL_EVALUATE = FAIL_PARSE << 1,
+			FAIL_FORMAT = FAIL_EVALUATE << 1
 		};
 
-		u32 flags;
+		enum flag {
+			none = 0,
+			getToken = 1,
+			getPreproc = getToken << 1,
+			getParse = getPreproc << 1,
+			getAST = getParse << 1,
+			getEval = getAST << 1,
+			getBin = getEval << 1
+		};
 
-		bool parseSuccess = false, preprocSuccess = false, evalSuccess = false;
+		u32 flags = 0;
+
+		int errorCode = 0;
 		std::vector<lexer::Token> tokens;
 		std::vector<preprocesser::Token> preprocTokens;
 		parser::Parser::ASTNode* pAST;
@@ -2931,83 +2957,87 @@ namespace assembler {
 
 		
 		std::vector<Token> tokens;
-		std::vector<Token> tokenBackup;
+		std::unordered_multimap<int, Token> tokenBackup;
 		std::vector<std::string> includedFiles = { preprocesser::normalizePath(fileName) };
 		int line = 0;
 		int fileId = 0;
-		
-		std::string curText;
-		std::vector<Token> curTokens;
 
 		preprocesser::functions::PreprocData preprocData;
 		preprocData.state = preprocesser::functions::State::normal;
+		// needed so includeCallback can resolve #include<...> paths relative to this file's own
+		// directory, and so a file #include-ing itself (directly or via a cycle) is caught.
+		preprocData.fileName = fileName;
+		preprocData.includedFiles.insert(preprocesser::normalizePath(fileName));
 		int preprocessError = 0;
-
+		
 		// initial lex/preprocess
-		lexer::lexer.lex(tokens, text);
 		// tag BEFORE backing up -- tokenBackup takes independent copies, so tagging tokens
 		// afterward would never reach them, leaving .line/.fileLine/.fileId uninitialized there.
+		lexer::lexer.lex(tokens, text);
 		line = preprocesser::tagLine(tokens);
-		tokenBackup.insert(tokenBackup.end(), tokens.begin(), tokens.end());
-		preprocesser::setTokens(tokens);
-		
-		while (true) {
-			preprocessError = preprocesser::preprocess(preprocData);
+		tokenBackup.reserve(tokenBackup.size() + tokens.size());
+		for (auto it = tokens.begin(); it != tokens.end(); ++it) 
+			tokenBackup.insert({it->line, *it});
 
-			if (preprocessError == 0)
-				break;
-			if (preprocessError != (int)preprocesser::functions::PreprocessError::INCLUDE_REQUEST)
-				break;
-
+		preprocesser::functions::includeCallback = [&](std::vector<Token>& tokOut, std::string path, preprocesser::functions::PreprocData* preprocData) -> int {
 			//get file -- resolve the #include<path> relative to fileName's own directory
-			std::string baseDir = fileName;
-			size_t baseSlash = baseDir.find_last_of("/\\");
-			baseDir = (baseSlash == std::string::npos) ? "" : baseDir.substr(0, baseSlash + 1);
 			// normalize before comparing/storing so "A/B/../C" and "A/C" (or "A/./C") are
 			// recognized as the same file for duplicate/circular #include detection.
-			std::string path = preprocesser::normalizePath(baseDir + preprocData.includePath);
 
-			// already included (directly or via a cycle) -- reject instead of re-reading it,
-			// which would just splice the same tokens in again forever.
-			bool alreadyIncluded = false;
-			for (auto it = includedFiles.cbegin(); it != includedFiles.cend(); ++it) {
-				if (*it == path) {
-					alreadyIncluded = true;
-					break;
-				}
-			}
-			if (alreadyIncluded) {
-				preprocessError = (int)preprocesser::functions::PreprocessError::DUPLICATE_INCLUDE;
-				break;
-			}
+			std::string baseDir = preprocData->fileName;
+			size_t baseSlash = baseDir.find_last_of("/\\");
+			baseDir = (baseSlash == std::string::npos) ? "" : baseDir.substr(0, baseSlash + 1);
+			// reassign the parameter directly rather than redeclaring -- a redeclared local of the
+			// same name would shadow the parameter and read itself (uninitialized) on the right-hand
+			// side instead of the actual #include<...> path.
+			path = preprocesser::normalizePath(baseDir + path);
 
+			if (preprocData->includedFiles.find(path) != preprocData->includedFiles.end())
+				return (int)preprocesser::functions::PreprocessError::DUPLICATE_INCLUDE;
+
+			std::string curText;
+			std::vector<Token> curTokens;
+
+			// getText
 			if(fileIoFunc(curText, path) != 0)
-				return -1;
-			// guarantee a trailing newline even if the file on disk doesn't end with one, so
-			// tagLine()'s line counter always advances past the included content exactly once
-			// and resolveSourceLocation() can't get its line numbers off by one as a result.
+				return (int)preprocesser::functions::PreprocessError::INVALID_INCLUDE_PATH;
 			if (curText.empty() || curText.back() != '\n')
 				curText.push_back('\n');
-			fileId++;
+			preprocData->includedFiles.insert(path);
 			includedFiles.push_back(path);
+			fileId++;
 
 			// lex
 			lexer::lexer.lex(curTokens, curText);
 
 			// preprocess -- tag before backing up, same reasoning as the initial lex/preprocess above
 			line = preprocesser::tagLine(curTokens, line, fileId);
-			tokenBackup.insert(tokenBackup.end(), curTokens.begin(), curTokens.end());
-			preprocesser::insertInclude(tokens, curTokens, preprocData);
-		}
+			for (auto it = curTokens.begin(); it != curTokens.end(); ++it) 
+				tokenBackup.insert({it->line, *it});
+
+			preprocesser::setTokensRem(curTokens);
+			int code = preprocesser::preprocessRem(*preprocData);
+			if (code) return code;
+
+			tokOut = curTokens;
+			return (int)preprocesser::functions::PreprocessError::SUCCESS;
+		};
+
+		preprocesser::setTokensRem(tokens);
+		preprocessError = preprocesser::preprocessRem(preprocData);
+		preprocesser::setTokensRep(tokens);
+		preprocessError = preprocesser::preprocessRep(preprocData);
 
 		if (dump.flags & AssemblerDump::getToken) {
-			dump.tokens = tokenBackup;
+			dump.tokens.reserve(tokenBackup.size());
+			for (auto it = tokenBackup.cbegin(); it != tokenBackup.cend(); ++it)
+				dump.tokens.push_back(it->second);
 		}
 
 		bool validPreprocess = preprocessError == 0;
-		dump.preprocSuccess = validPreprocess;
+		dump.errorCode |= (validPreprocess) ? 0 : (int)AssemblerDump::FAIL_PREPROCESS;
 
-		if (dump.flags & AssemblerDump::getPreproc || !dump.preprocSuccess) {
+		if (dump.flags & AssemblerDump::getPreproc || !validPreprocess) {
 			dump.preprocTokens = tokens;
 		}
 
@@ -3018,14 +3048,14 @@ namespace assembler {
 		Parser::ASTNode* pAST;
 		int errorLine = 0;
 		bool validParse = parser::parser.parse(pAST, &errorLine, tokens);
-		dump.parseSuccess = validParse;
+		dump.errorCode |= (validParse) ? 0 : (int)AssemblerDump::FAIL_PARSE;
 
 		if (dump.flags & AssemblerDump::getAST || !validParse) {
 			dump.pAST = pAST;
 		}
 
 		if (dump.flags & AssemblerDump::getEval || !validParse) {
-			if (!dump.parseSuccess) {
+			if (!validParse) {
 				int errFileId = 0, errFileLine = 0;
 				if (preprocesser::resolveSourceLocation(tokenBackup, errorLine, errFileId, errFileLine)) {
 					dump.errorMessage = "error at ";
@@ -3034,39 +3064,39 @@ namespace assembler {
 					dump.errorMessage += std::to_string(errFileLine);
 				}
 				else {
-					dump.errorMessage = "error at line ";
+					dump.errorMessage = "error at absline ";
 					dump.errorMessage += std::to_string(errorLine);
 				}
 				dump.errorMessage += ": ";
-				for (auto it = tokenBackup.cbegin(); it->line <= errorLine && it != tokenBackup.cend(); ++it) {
-					if (it->line == errorLine) {
-						if (it->type == lexer::TokenType::newline)
-							break;
-						dump.errorMessage += it->text;
-					}
-				}
+				auto range = tokenBackup.equal_range(errorLine);
+				for (auto it = range.first; it != range.second; ++it)
+					dump.errorMessage += it->second.text;
 
 				dump.errorMessage += "\nunexpected token: ";
-				dump.errorMessage += pAST->child[0]->text;
+				// pAST here is the parser's partial/error node, not a normal reduced node -- it can
+				// legitimately have zero children (e.g. the error occurs on the very first token,
+				// before any reduction happened), so indexing child[0] unconditionally segfaults.
+				if (!pAST->child.empty())
+					dump.errorMessage += pAST->child[0]->text;
 			}
 		}
 
 		if (!validParse) {
 			parser::parser.delAST(pAST);
-			return -2;
+			return -1;
 		}
 
 		evaluator::functions::EvalData data;
 		data.fileName = outputMangle;
 		evaluator::setTree(pAST);
-		bool validEvaluate = evaluator::evaluate(data) == 0;
-		dump.evalSuccess = validEvaluate;
+		int evaluateError = evaluator::evaluate(data);
+		bool validEvaluate = evaluateError == 0;
+		dump.errorCode |= (validEvaluate) ? 0 : (int)AssemblerDump::FAIL_EVALUATE;
 
 		if (!validEvaluate) {
 			parser::parser.delAST(pAST);
-			return -3;
+			return -1;
 		}
-		
 
 		std::vector<u8> raw8;
 		format::formatData(data);

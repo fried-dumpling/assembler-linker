@@ -105,6 +105,10 @@ int main(int argc, char* argv[]) {
 
 	assembler::assemble(buff, binary, dump, inputFile, outputBase);
 
+	bool preprocOk = !(dump.errorCode & assembler::AssemblerDump::FAIL_PREPROCESS);
+	bool parseOk = !(dump.errorCode & assembler::AssemblerDump::FAIL_PARSE);
+	bool evalOk = !(dump.errorCode & assembler::AssemblerDump::FAIL_EVALUATE);
+
 	if (dumpToken) {
 		cout << "lex->" << endl;
 		cout << "------------------------------------------------------------" << endl;
@@ -143,7 +147,7 @@ int main(int argc, char* argv[]) {
 		cout << "------------------------------------------------------------" << endl;
 	}
 
-	if (dumpPreproc || !dump.preprocSuccess) {
+	if (dumpPreproc || !preprocOk) {
 		cout << "preproc->" << endl;
 		cout << "------------------------------------------------------------" << endl;
 		for (auto it = dump.preprocTokens.begin(); it != dump.preprocTokens.end(); it++) {
@@ -180,19 +184,24 @@ int main(int argc, char* argv[]) {
 		}
 		cout << "------------------------------------------------------------" << endl;
 		cout << "preproc->" << endl;
-		cout << (dump.preprocSuccess ? "success" : "failed") << endl;
+		cout << (preprocOk ? "success" : "failed") << endl;
 		cout << "------------------------------------------------------------" << endl;
 	}
 
-	if (dumpEvaluate || dumpBinary || !dump.parseSuccess) {
+	if (dumpEvaluate || dumpBinary || !parseOk) {
 		cout << "parse->" << endl;
-		cout << (dump.parseSuccess ? "success" : "failed") << endl;
-		if (!dump.parseSuccess)
+		cout << (parseOk ? "success" : "failed") << endl;
+		if (!parseOk)
 			cout << dump.errorMessage << endl;
 		cout << "------------------------------------------------------------" << endl;
-		cout << "evaluate->" << endl;
-		cout << (dump.evalSuccess ? "success" : "failed") << endl;
-		cout << "------------------------------------------------------------" << endl;
+		// evaluate() never runs when the parse failed (assemble() bails out right after
+		// parsing) -- print it only when parsing actually succeeded, otherwise evalOk's
+		// default-true value would misleadingly read as "evaluate succeeded".
+		if (parseOk) {
+			cout << "evaluate->" << endl;
+			cout << (evalOk ? "success" : "failed") << endl;
+			cout << "------------------------------------------------------------" << endl;
+		}
 	}
 
 	if (dumpBinary) {
@@ -222,5 +231,11 @@ int main(int argc, char* argv[]) {
 		return -1;
 	}
 
+	// report failure via exit code too -- otherwise a caller (build script, linker) can't
+	// tell a failed assembly (which still writes an empty/partial .o file above) from success
+	// without parsing this program's text output.
+	if (!preprocOk || !parseOk || !evalOk)
+		return -1;
+
 	return 0;
-}	
+}
