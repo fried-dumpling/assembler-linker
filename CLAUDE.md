@@ -1,6 +1,8 @@
-# CLAUDE.md — src/assembler-linker
+# CLAUDE.md — src (assembler-linker)
 
-이 파일은 Claude Code가 이 디렉토리(`computer 32 (new)/src/assembler-linker`, 어셈블러+링커 프로젝트 루트)에서 작업을 이어갈 때 빠르게 현재 상태를 파악하기 위한 참고 문서입니다. (2026-09-20까지는 `assembler/` 서브폴더에 있었으나 이후 사용자가 루트로 옮김.) **이 프로젝트는 아직 미완성이며, 명시적으로 요청받기 전까지는 빌드/테스트를 수행하지 않습니다.**
+이 파일은 Claude Code가 이 디렉토리(`computer 32 (new)/src/assembler-linker`, 어셈블러+링커 프로젝트 루트)에서 작업을 이어갈 때 빠르게 현재 상태를 파악하기 위한 참고 문서입니다. (2026-09-20까지는 `assembler/` 서브폴더에 있었으나 이후 사용자가 루트로 옮김.) (2026-10-11부터 사용자가 빌드/회귀 테스트를 묻지 않고 해도 된다고 함 — 배포와 커밋은 여전히 요청 시에만.)
+
+> **2026-10-11 이동**: `src/assembler-linker/`의 내용물 전체(`.git`, `.claude` 포함)를 한 단계 위인 `src/`로 옮김 — 이제 git 저장소 루트와 프로젝트 루트는 `src/`. 아래 문서의 `src/assembler-linker/...` 경로는 전부 `src/...`로 읽을 것. 같은 `src/`의 `csvsearcher/`, `hexdump/`, `textediter/`는 이 이동으로 git에서 untracked로 보임(아직 추가 안 함). 빈 `src/assembler-linker` 폴더는 다른 프로세스가 핸들을 잡고 있어 삭제 실패 — 나중에 수동 삭제.
 
 ## 디렉토리 구조 (2026-09-20 개편, 이후 사용자가 추가 개편)
 
@@ -21,6 +23,7 @@ src/assembler-linker/
   test/                 — (2026-10-10 신설, Claude가 수행) 테스트용 소스/산출물 모음
     program/              과거 assembler/program/ 이었던 git-tracked 테스트 소스 31개 (`git mv`로 옮김, 커밋 히스토리 보존됨)
     out/                  과거 build/out/ 이었던 untracked 테스트 산출물(.o/.bin) — 세션 중 회귀 테스트 실행 결과 캐시, git에 안 올라감
+  SYNTAX.md              — (54번) 어셈블리 문법/인코딩 사용자 문서
   build-asm.cmd          — 어셈블러 빌드 스크립트 (assembler\main.cpp → assembler.exe)
   build-lnk.cmd          — 링커 빌드 스크립트 (linker\main.cpp → linker.exe) — Claude가 build-asm.cmd 패턴 그대로 생성
 ```
@@ -408,7 +411,7 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
 
 49. (2026-10-10) `DataValue::length` 미설정 수정: `evaluateCode`의 `allocate`가 `length`를 안 채워 `.data` 바이트가 0개로 나가던 문제(라벨 주소는 `sectionByte`로 따로 세서 맞았음). `length = child[0]`(바이트, CONSTANT 보장) 대입, `registerReplace`에 `length/8` 대신 `length`(바이트), 비상수 값의 `rep.size = min(32, length*8)`(4바이트 미만 allocate에서 32비트 패치가 앞 데이터를 덮던 문제 — `ptr: 4, v` 다음 `ptr2: 2, w`가 ptr 하위 2바이트를 0으로 덮음). 검증: add_terminal 496→672바이트, `ptr`/`ptr2`/1바이트 `b` 재배치 정확, 회귀 25/29 asm+link.
     - (후속, 사용자 선택 B → 이후 사용자가 직접 A로 되돌림: 현재는 끝 기준 채우기) `pushByteN`을 시작 기준 채우기로 변경: size<=4는 하위 size바이트(빅엔디안, 기존 유지), size>4는 값을 앞에서부터 빅엔디안 반복하고 마지막 부분 워드는 잘림(`5, 0x11223344` → `11 22 33 44 11`; 이전엔 끝 기준이라 `44 11 22 33 44`로 라벨 첫 워드가 회전된 값이었음). 비상수 재배치 위치도 마지막 워드→**첫 워드**(`registerReplace`에 `min(length,4)`).
-    - 남은 것(미수정): 4바이트 초과 allocate의 비상수 값은 첫 워드에만 패치되고 나머지는 0, `allocate_zero`(.bss)는 바이트/크기를 전혀 직렬화 안 함, 4의 배수 아닌 크기 뒤 라벨들의 워드 비정렬.
+    - 남은 것(미수정): 4바이트 초과 allocate의 비상수 값은 첫 워드에만 패치되고 나머지는 0, 4의 배수 아닌 크기 뒤 라벨들의 워드 비정렬. (`.bss` 크기 직렬화는 53번에서 해결)
 
 50. (2026-10-10) `equ`/`$` 평가 연결 + allocate 섹션 매핑 버그:
     - **equate**: `calculateAddr`에서 식 값이 있으면 `idenifierValue[name]`에 ExprData 복사(없으면 skip, 에러X). `evaluateCode`에서 아직 없으면 재시도된 식 값으로 등록, 끝내 없으면 `MISSING_EXPRESSION`. 사용처는 식을 복사하므로 `K equ later+4`는 `later` 재배치로 처리됨. 한계: equ 정의보다 앞에서 쓰이고 + equ 식이 전방 라벨에 의존하면 사용처가 먼저 평가돼 실패.
@@ -430,7 +433,38 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
     - 확인만 한 것: `run.txt`는 소스가 아니라 바이너리(실패가 정상). ram+ram2+ram3 링크가 108→260바이트인 건 49번으로 `.data`가 실제로 출력되기 때문(168+44+48). 경고 중 `for (it; ...)`류/`readInclude` 미처리 switch/미사용 변수는 동작 영향 없음.
     - 남은 실패: parse 4(branch/factorial_norec/prime_old/texteditor, LALR/소스), eval 1(bcdtodec, 소스에 없는 라벨).
 
+53. (2026-10-10) `.bss` 크기를 오브젝트에 기록: `format_data::Section`에 `u32 size`(섹션이 차지하는 주소 공간) 추가, `getRaw`/`loadRaw`에 직렬화(**오브젝트 포맷 변경 — 이전 .o는 새 링커와 호환 안 됨, 재어셈블 필요**). 어셈블러 `formatData`는 `size = sectionByte[i]`(bss의 `allocate_zero`도 포함, text/data는 바이트 수와 같음). 링커는 `SectionData::size`를 두고 `convertData`의 localBase, `mergeByName`의 파일별 오프셋, `mergeByType`의 그룹 배치/`placement.end`/`dataBase`·`bssBase`를 전부 바이트 수(`ninIndex.size()`) 대신 `size`로 계산. bss는 바이트 없이 주소만 차지(최종 바이너리에 포함 안 됨).
+    - 고쳐진 실제 버그: 여러 파일이 각자 `.bss`를 가지면 전부 크기 0으로 취급돼 같은 주소에 겹쳤음(이전: 두 파일의 bss 라벨이 둘 다 0x10, 수정 후 0x10/0x20). 단일 파일에서 `.bss` 뒤에 다른 `.bss`가 오는 경우도 정확.
+    - 검증: 회귀 25개 프로그램의 최종 바이너리가 이전 배포본과 바이트 단위로 동일(text/data에서 sectionByte == 바이트 수 확인), bss 단일/2파일 케이스 주소 검산.
+
+54. (2026-10-10) 루트에 `SYNTAX.md`(사용자용 문법 문서) 작성: 도구 사용법, 파일/섹션 구조, 라벨·equ·`$`, 데이터 채우기 규칙, 식 우선순위·리터럴, 레지스터/모드/플래그 값, 명령어 opcode·인코딩 표, 전처리기, 링크 배치, 오류 메시지. 내용은 소스(`CreateData` 렉서/파서 규칙, `instructionBase`/`regBase`/`flagBase` 등 테이블, `evaluateCode` 인코딩)와 실제 배포본 dasm으로 확인한 결과 기준. 문법/인코딩을 바꾸면 이 문서도 갱신할 것.
+    - 작성 중 확인된 동작(미수정): 인자 0개 매크로를 괄호 없이(`M`) 부르면 다음 토큰이 인자로 먹힘, `#include` 경로가 중첩 include에서도 최초 입력 파일 디렉터리 기준(`PreprocData::fileName`이 갱신 안 됨), `gen[n]` 인덱스 범위 검사 없음(25 이상이면 특수 레지스터 id와 겹침), `intervec`의 첫 피연산자는 `reg` 키워드 토큰이라 항상 0.
+
+55. (2026-10-10) `computer 32 (new)/digital computer 32/ISA-32.xlsx`(CPU 쪽 ISA 시트)를 읽어 같은 폴더에 `ISA.md`로 요약. **이제 레포 밖이 아닌 ISA 문서가 있음** — opcode/필드 의미는 xlsx(=ISA.md)를 우선 참고. 시트와 현재 어셈블러의 불일치(미수정, ISA.md 6절): `pctl`은 시트상 7C 하나+byte3 en/dis(어셈블러는 7C/7D), `getabs` 7D(어셈블러 7E), 캐시는 `cache` 7E 하나+id의 md 비트로 flush/inval 구분(어셈블러는 flush 7F/inval 80 분리), 캐시 id all=0x40·md=0x80(어셈블러 ALL=0x80), `atom` 7F 미구현, `intervec` byte1은 base 레지스터(어셈블러는 `reg` 키워드라 0), 시트상 `rol`=rollright/`ror`=rollleft로 이름과 반대.
+
+56. (2026-10-10) `global`/`extern` 파싱 + `BUGS.md`(사용자가 floating point 코드 작성 중 정리) 3건 수정:
+    - **global/extern**: 사용자가 미리 써둔 규칙(`NT::global`/`AT::global`, `NT::_extern`/`AT::_extern`, nodeIndex 1 = 이름, 식별자 1개)에 맞춰 NT/AT enum과 디버그 문자열 추가, `outer_section` 생산규칙(global/extern 1개 이상, 섹션 앞·사이·뒤) 추가, version 405→406. 평가기 연결은 아직 없음(outer_section은 기존대로 OUTER 섹션을 하나 만들 뿐, 링커는 OUTER를 건너뜀). 처음엔 콤마 목록(`global a, b`)용 `global_decl`/`identifier_list`로 만들었다가 사용자 규칙과 겹쳐 사용자 쪽 이름/형태로 통일함.
+    - **BUGS 1 (1인자 매크로)**: `)`에서 마지막 인자를 넣는 조건이 `args.size()`라 1인자 호출은 인자가 안 들어가고 파일 끝까지 먹음. "쉼표가 있었거나 curArg가 비어있지 않으면" push, 그 뒤 개수 불일치는 `MACRO_ARG_COUNT_MISMATCH`. 확장 코드는 `expandMacro()`로 분리하고, 인자 0개 매크로는 `(`가 안 따라오면 normal 상태에서 즉시 확장(예전엔 다음 토큰을 먹음), 인자 있는 매크로가 `(` 없이 오면 `EXPECTED_MACRO_CALL`.
+    - **BUGS 2 (`;` 단독)**: 문법이 안 쓰는 `semicolon` 렉서 규칙 삭제(같은 길이면 앞 규칙 우선이라 `;[^\n]*` 주석에 짐), version 406→407.
+    - **BUGS 3 (dlnk segfault)**: `Format::loadRaw`를 `bool`로 바꾸고 헤더 크기/구역 연속성·범위/레코드 경계(NUL, 고정 필드, EOX)/섹션 start·end 검사. `link()`에 `errorMessage` 인자 추가, `dlnk`가 `invalid object file '<경로>'` 출력. `dasm`은 실패 시 출력 파일을 쓰지 않고 기존 파일 삭제.
+    - 검증: BUGS 재현 3건 + 매크로 인자 0/1/2개·괄호 안 쉼표·개수 오류·괄호 생략, `;` 단독 줄, global/extern 위치별, 0바이트/무작위/잘린/섹션 범위 손상 오브젝트. 회귀 25개 최종 바이너리가 배포본과 바이트 단위 동일. SYNTAX.md/BUGS.md 갱신.
+
+57. (2026-10-10) `global`/`extern` 의미 구현 (사용자가 추가한 `EvalData::globalIdentifier`/`externIdentifier` set + `calculateAddr`의 수집 case 기반):
+    - **mangle 결정 (`formatData`)**: definedIdentifier는 `globalIdentifier`에 있으면 원래 이름, 아니면 `파일명#이름`. usedIdentifier(재배치 식의 IDENTIFIER)는 global 또는 extern이면 원래 이름, 아니면 mangle. 사용자가 남겨둔 빈 `if ()` 두 곳을 채움.
+    - **extern 사용 (`calculateExpr` identifier case)**: `idenifierValue`에 없고 extern이면 `{COMPLEX, 0, {}, [IDENTIFIER name]}` → 항상 재배치. extern 선언이 사용보다 뒤에 있어도 evaluateCode 재시도에서 해결됨. 상수가 필요한 곳(allocate 크기)은 `NOT_CONSTANT`.
+    - **검사 (`evaluateCode`)**: `global` 이름이 정의 안 됨 → `GLOBAL_UNDEFINED`, `extern` 이름이 이 파일에 정의됨 → `EXTERN_DEFINED`.
+    - **링커**: `EvalData::errorMessage` 추가. `checkDuplicateSymbols()`(mergeByType 다음): 같은 이름이 두 파일의 definedLabel에 있으면 `duplicate symbol`(지역 이름은 접두사가 달라 안 겹침; 출력 파일명이 같은 두 오브젝트도 이제 여기서 잡힘). `mapExpr`의 미해결 이름 → `undefined symbol '<이름>' (used in '<파일>')`. `link()`가 메시지를 `errorMessage`로 전달.
+    - 검증: lib(global 함수/data/equ 상수 + 지역 loop) + main(extern 3개 + 지역 loop + `.data p: 4, add1`)을 두 순서로 링크해 전 주소 손계산 일치, extern 선언을 사용 뒤에 둔 경우, 미정의/중복/global 미정의/extern 정의/extern 크기 오류. 회귀 25개 배포본과 바이트 동일. SYNTAX.md 8·9·10절 갱신.
+
+58. (2026-10-10) 56·57번까지 반영해 빌드·배포: `computer 32 (new)/bin`과 `digital computer 32/tools/bin`의 dasm/dlnk 교체(table.bin 전부 삭제 후 재생성, dasm_table.bin 454348바이트 — semicolon 규칙 삭제로 작아짐). `digital computer 32/tools/`는 소스 미러 구조(`assembler/`·`linker/`·`common/`·`hexdump/` + `bin/` + `SYNTAX.md`)라 변경된 소스 5개와 `SYNTAX.md`를 그대로 복사, `BUGS.md`(tools 기준 경로로 쓰여 있음)도 `tools/BUGS.md`로 배포. 확인: 두 위치 모두 회귀 25/29, BUGS 재현 3건 해결, `digital computer 32/program`의 `floatingpoint/float.txt`·`fp_harness.txt` 어셈블+링크 성공. `texteditor.txt`는 19행이 `#macro`가 아니라 `#define LSET 2`로 쓰인 소스 오류라 이제 전처리 단계에서 `#end without matching` 으로 실패(이전엔 파서에서 실패).
+
+59. (2026-10-11) `-o` 플래그: dasm `<in> [-o out]`(기본 `<입력>.o`), dlnk `<in...> [-o out]`(기본 `a.out`). 쓰이지 않던 dasm `-double`/`dumpAST` 제거. 예전 위치 인자 형식은 오류로 끝남.
+60. (2026-10-11) `dlnk -padbss`: `linker::bssPadding`이 켜지면 `mergeByType`이 bss 그룹 바이트를 그 크기만큼 0으로 채움(맨 뒤라 주소/재배치 영향 없음).
+61. (2026-10-11) 저장소 루트를 `src/assembler-linker/` → `src/`로 이동(`.git` 포함). `csvsearcher/`·`textediter/`는 `.gitignore`. `hexdump/`는 저장소에 포함, `build-hex.cmd` 추가(→ `build/hexdump.exe`). 빈 `src/assembler-linker` 폴더는 핸들이 잡혀 삭제 실패(수동 삭제).
+62. (2026-10-11) 터미널 입출력 통일(`CLI.md`): `common/iotool.hpp`에 `errPosGenerator`(GCC 형식 위치)와 `Terminal::TerminalIO<FlagType>`(공용 인자 파서) + 공유 오류/IO 함수(`toolError`/`codeError`/`readFailed`/`writeFailed`/`usageError`/`parseNumber`, 종료 코드 0/1/2). 세 main이 사용, stdout=요청 출력·stderr=진단. `assemble()`의 위치 오류는 `describeError`가 `<file>:<line>: error: <detail>\n    <소스>`로 만듦. hexdump는 `-o` 추가, 값 검사로 0 나누기/NULL 크래시 해결. 회귀 25/29 바이너리 배포본과 동일. 같은 날 SYNTAX.md 1·9·10절 갱신, `bin/`·`digital computer 32/tools`에 dasm/dlnk/hexdump 배포.
+
 ## 작업 방식 관련 주의사항
 
-- **빌드/테스트를 절대 자동으로 수행하지 말 것** — 사용자가 "아직 완성본 아니니까 빌드나 테스트까지는 하지 말고"라고 명시함. 명시적 요청이 있을 때만 수행.
+- ~~빌드/테스트를 자동으로 수행하지 말 것~~ → 2026-10-11 해제: 변경 후 빌드와 회귀 테스트(`test/program`, 25/29 성공 기대)는 묻지 않고 해도 됨. 배포/커밋은 요청 시에만.
+- bash 도구로 heredoc/sed를 쓰면 백슬래시가 한 단계 줄어드는 경우가 있었음 — 백슬래시가 든 스크립트는 Write로 파일을 만든 뒤 실행할 것.
 - 이 파일(`assembler.hpp`)은 사용자가 대화 밖에서 직접 동시 편집하는 경우가 있었음(과거 Edit 충돌 이력) — 편집 전에는 항상 최신 상태를 다시 Read할 것.

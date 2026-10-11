@@ -19,6 +19,10 @@
 #include "stackmachine.hpp"
 
 namespace linker {
+    // when set, mergeByType fills .bss with real zero bytes at the end of the final binary
+    // (otherwise .bss only takes address space and the binary ends after .data) -- dlnk -padbss
+    bool bssPadding = false;
+
     namespace format {
 		using u32 = unsigned __int32;
 		using u8 = unsigned __int8;
@@ -173,6 +177,7 @@ namespace linker {
                 SectionType type;
                 Indexer ninIndex; //indexes for initialBin for lookup
                 std::unordered_map<u32, MapData> map;  // keyed by logical offset into `ninIndex` above (as if its ranges were concatenated)
+                u32 size;            // address space occupied (Format::Section::size summed); exceeds ninIndex.size() only for .bss, which has no bytes
 
                 u32 sectionOffset;   // this section's final absolute base once merged into text/data/bss (filled by mergeByType)
                 std::vector<u8> calcBin; // relocated bytes, filled by a later "apply relocations" pass -- not written here
@@ -218,6 +223,8 @@ namespace linker {
 
                 u32 textBase, dataBase, bssBase;
                 std::vector<u8> totalBin;
+
+                std::string errorMessage; // why the last pass failed (undefined/duplicate symbol), empty otherwise
 			} EvalData;
 
             // Iterator naming, fixed by nesting depth, in every function below (and their
@@ -264,7 +271,8 @@ namespace linker {
                             idx = slotIt->second;
 
                         SectionData& sd = file.sections[idx];
-                        localBase.push_back(sd.ninIndex.size());
+                        localBase.push_back(sd.size);
+                        sd.size += si->size;
 
                         u32 rangeStart = (u32)data.initialBin.size();
                         data.initialBin.insert(data.initialBin.end(), obj.binary.begin() + si->start, obj.binary.begin() + si->end);
@@ -351,7 +359,8 @@ namespace linker {
                             idx = slotIt->second;
 
                         SectionData& merged = data.sections[idx];
-                        si->sectionOffset = merged.ninIndex.size(); // offset within the cross-file blob, for now
+                        si->sectionOffset = merged.size; // offset within the cross-file blob, for now
+                        merged.size += si->size;
                         // ti: each (possibly non-contiguous) range making up this file's section --
                         // just copy the small {start,end} pair, never the bytes themselves
                         for (auto ti = si->ninIndex.indexes.cbegin(); ti != si->ninIndex.indexes.cend(); ++ti)
@@ -369,35 +378,43 @@ namespace linker {
             // resolves every file's pending identifiers to their final absolute address.
             inline bool mergeByType(EvalData& data) {
                 std::vector<u8> textBin, dataBin, bssBin;
+                // address space taken by each group so far; bytes (textBin/...) and size only
+                // differ for .bss, which reserves space without contributing bytes
+                u32 textSize = 0, dataSize = 0, bssSize = 0;
 
                 // it: each cross-file-merged (type, name) section
                 for (auto it = data.sections.begin(); it != data.sections.end(); ++it) {
                     std::vector<u8>* group;
                     std::vector<Section>* placements;
+                    u32* groupSize;
                     switch (it->type) {
-                    case SectionType::TEXT: group = &textBin; placements = &data.texts; break;
-                    case SectionType::DATA: group = &dataBin; placements = &data.datas; break;
-                    case SectionType::BSS: group = &bssBin; placements = &data.bsses; break;
+                    case SectionType::TEXT: group = &textBin; placements = &data.texts; groupSize = &textSize; break;
+                    case SectionType::DATA: group = &dataBin; placements = &data.datas; groupSize = &dataSize; break;
+                    case SectionType::BSS: group = &bssBin; placements = &data.bsses; groupSize = &bssSize; break;
                     default: continue; // OUTER, or ROD (not implemented yet) -- not merged
                     }
 
-                    it->sectionOffset = (u32)group->size(); // group-relative for now
+                    it->sectionOffset = *groupSize; // group-relative for now
+                    *groupSize += it->size;
                     // si: each range making up this merged section's bytes, appended in order --
                     // this is the one place the pipeline actually copies bytes (out of initialBin)
                     for (auto si = it->ninIndex.indexes.cbegin(); si != it->ninIndex.indexes.cend(); ++si)
                         group->insert(group->end(), data.initialBin.begin() + si->first, data.initialBin.begin() + si->second);
+                    // .bss has no bytes of its own; pad its whole size with zeros when requested
+                    if (it->type == SectionType::BSS && bssPadding)
+                        group->resize(*groupSize, 0);
 
                     Section placement = {};
                     placement.name = it->name;
                     placement.type = (u32)it->type;
                     placement.start = it->sectionOffset;
-                    placement.end = it->sectionOffset + it->ninIndex.size();
+                    placement.end = it->sectionOffset + it->size;
                     placements->push_back(placement);
                 }
 
                 data.textBase = 0;
-                data.dataBase = data.textBase + (u32)textBin.size();
-                data.bssBase = data.dataBase + (u32)dataBin.size();
+                data.dataBase = data.textBase + textSize;
+                data.bssBase = data.dataBase + dataSize;
 
                 // it: each placement-ledger entry in each group, patched group-relative -> absolute
                 for (auto it = data.texts.begin(); it != data.texts.end(); ++it) { it->start += data.textBase; it->end += data.textBase; }
@@ -501,8 +518,10 @@ namespace linker {
                             resolvedIdentifiers[(size_t)(si - it->usedIdentifier.cbegin())] = labelIt->second;
                             found = true;
                         }
-                        if (!found)
-                            return false; // undefined symbol
+                        if (!found) {
+                            data.errorMessage = "undefined symbol '" + *si + "' (used in '" + it->name + "')";
+                            return false;
+                        }
                     }
 
                     // si: each of that file's sections
@@ -557,10 +576,29 @@ namespace linker {
                 return true;
             }
             
+            // global symbols are exported by plain name, so the same name defined in two files is
+            // ambiguous; file-local names carry their file's prefix and never collide this way
+            inline bool checkDuplicateSymbols(EvalData& data) {
+                std::unordered_map<std::string, std::string> owner; // name -> defining file
+                // it: each file, si: each name it defines
+                for (auto it = data.files.cbegin(); it != data.files.cend(); ++it) {
+                    for (auto si = it->definedLabel.cbegin(); si != it->definedLabel.cend(); ++si) {
+                        auto found = owner.find(si->first);
+                        if (found != owner.end()) {
+                            data.errorMessage = "duplicate symbol '" + si->first + "' in '" + found->second + "' and '" + it->name + "'";
+                            return false;
+                        }
+                        owner[si->first] = it->name;
+                    }
+                }
+                return true;
+            }
+
             inline bool evaluate(EvalData& data, const std::vector<std::pair<std::string, format::Format>>& objects) {
                 if (!convertData(data, objects)) return false;
                 if (!mergeByName(data)) return false;
                 if (!mergeByType(data)) return false;
+                if (!checkDuplicateSymbols(data)) return false;
                 if (!mapExpr(data)) return false;
 
                 return true;
@@ -573,19 +611,25 @@ namespace linker {
     // Links the given raw object files (each one a serialized format::Format, as produced by
     // the assembler's format::getRaw) into a single final binary. No logging -- just evaluates
     // the pipeline (convertData -> mergeByName -> mergeByType -> mapExpr) and returns the result.
-    inline bool link(std::vector<u8>& outBinary, const std::vector<std::pair<std::string, std::vector<u8>>>& rawObjects) {
+    // errorMessage is set when an input isn't a valid object file
+    inline bool link(std::vector<u8>& outBinary, const std::vector<std::pair<std::string, std::vector<u8>>>& rawObjects, std::string& errorMessage) {
         std::vector<std::pair<std::string, format::Format>> objects;
 
         // it: each raw object file's bytes
         for (auto it = rawObjects.cbegin(); it != rawObjects.cend(); ++it) {
             format::Format obj = {};
-            obj.loadRaw(it->second);
+            if (!obj.loadRaw(it->second)) {
+                errorMessage = "invalid object file '" + it->first + "'";
+                return false;
+            }
             objects.push_back({ it->first, obj });
         }
 
         evaluate::functions::EvalData data;
-        if (!evaluate::functions::evaluate(data, objects))
+        if (!evaluate::functions::evaluate(data, objects)) {
+            errorMessage = data.errorMessage;
             return false;
+        }
 
         outBinary = data.totalBin;
         return true;

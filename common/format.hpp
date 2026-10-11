@@ -59,6 +59,9 @@ namespace format_data {
 		u32 type;
 		u32 start;
 		u32 end;
+		// address space the section occupies. Equals end - start for sections with content;
+		// a .bss section has no bytes in `binary` (start == end) but a nonzero size.
+		u32 size;
 
 		void getRaw(std::vector<u8>& out) {
 			out.insert(out.end(), name.begin(), name.end());
@@ -66,6 +69,7 @@ namespace format_data {
 			push32(out, type);
 			push32(out, start);
 			push32(out, end);
+			push32(out, size);
 		}
 
 		void loadRaw(std::vector<u8>::const_iterator& it) {
@@ -75,6 +79,7 @@ namespace format_data {
 			type = read32(it);
 			start = read32(it);
 			end = read32(it);
+			size = read32(it);
 		}
 	} Section;
 
@@ -246,26 +251,64 @@ namespace format_data {
 			out.insert(out.end(), usedIdentifierRaw.begin(), usedIdentifierRaw.end());
 		}
 
-		void loadRaw(const std::vector<u8>& in) {
+		// Returns false (Format left cleared) if `in` is not a well-formed object: too short,
+		// region offsets out of order / out of range, or a record that runs past its region.
+		bool loadRaw(const std::vector<u8>& in) {
 			clear();
 
+			if (in.size() < Header::size())
+				return false;
 			auto it = in.cbegin();
+			if (read32(it) != Header::size())
+				return false;
+			it = in.cbegin();
 			Header header = {};
 			header.loadRaw(it);
+
+			// regions are stored back to back right after the header, covering the rest of the file
+			u32 bounds[12] = { header.sectionsStart, header.sectionsEnd, header.binaryStart, header.binaryEnd,
+				header.mapperStart, header.mapperEnd, header.expressionsStart, header.expressionsEnd,
+				header.definedIdentifierStart, header.definedIdentifierEnd, header.usedIdentifierStart, header.usedIdentifierEnd };
+			u32 prev = Header::size();
+			for (int i = 0; i < 12; i += 2) {
+				if (bounds[i] != prev || bounds[i + 1] < bounds[i])
+					return false;
+				prev = bounds[i + 1];
+			}
+			if (prev != in.size())
+				return false;
+
+			typedef std::vector<u8>::const_iterator CIt;
+			// [it, end) holds a NUL-terminated string followed by at least `tail` bytes
+			auto fits = [](CIt it, CIt end, int strings, size_t tail) {
+				for (int i = 0; i < strings; i++) {
+					while (it < end && *it != 0) ++it;
+					if (it >= end) return false;
+					++it;
+				}
+				return (size_t)(end - it) >= tail;
+			};
 
 			auto sectionsIt = in.cbegin() + header.sectionsStart;
 			auto sectionsEndIt = in.cbegin() + header.sectionsEnd;
 			while (sectionsIt < sectionsEndIt) {
+				if (!fits(sectionsIt, sectionsEndIt, 1, 4 * sizeof(u32)))
+					return false;
 				Section s = {};
 				s.loadRaw(sectionsIt);
 				sections.push_back(s);
 			}
 
 			binary.assign(in.cbegin() + header.binaryStart, in.cbegin() + header.binaryEnd);
+			for (auto si = sections.cbegin(); si != sections.cend(); ++si)
+				if (si->start > si->end || si->end > binary.size())
+					return false;
 
 			auto mapperIt = in.cbegin() + header.mapperStart;
 			auto mapperEndIt = in.cbegin() + header.mapperEnd;
 			while (mapperIt < mapperEndIt) {
+				if (!fits(mapperIt, mapperEndIt, 1, 4 * sizeof(u32)))
+					return false;
 				Mapper m = {};
 				m.loadRaw(mapperIt);
 				mapper.push_back(m);
@@ -277,6 +320,8 @@ namespace format_data {
 				std::vector<Operation> expr;
 				Operation op = {};
 				do {
+					if (exprEndIt - exprIt < (long long)(2 * sizeof(u32)))
+						return false; // ran out before the expression's EOX
 					op = {};
 					op.loadRaw(exprIt);
 					expr.push_back(op);
@@ -287,6 +332,8 @@ namespace format_data {
 			auto definedIt = in.cbegin() + header.definedIdentifierStart;
 			auto definedEndIt = in.cbegin() + header.definedIdentifierEnd;
 			while (definedIt < definedEndIt) {
+				if (!fits(definedIt, definedEndIt, 2, 2 * sizeof(u32)))
+					return false;
 				Identifier id = {};
 				id.loadRaw(definedIt);
 				definedIdentifier.push_back(id);
@@ -295,12 +342,15 @@ namespace format_data {
 			auto usedIt = in.cbegin() + header.usedIdentifierStart;
 			auto usedEndIt = in.cbegin() + header.usedIdentifierEnd;
 			while (usedIt < usedEndIt) {
+				if (!fits(usedIt, usedEndIt, 1, 0))
+					return false;
 				std::string name;
 				for (; *usedIt != 0; ++usedIt)
 					name.push_back(*usedIt);
 				++usedIt;
 				usedIdentifier.push_back(name);
 			}
+			return true;
 		}
 	} Format;
 }

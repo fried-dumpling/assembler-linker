@@ -241,7 +241,6 @@ namespace assembler {
 				{ "\\]", TokenType::closebrack },
 
 				{ ":", TokenType::colon },
-				{ ";", TokenType::semicolon },
 
 				{ "\\+", TokenType::plus },
 				{ "-", TokenType::minus },
@@ -573,7 +572,9 @@ namespace assembler {
 				EXPECTED_IF_IDENTIFIER,  // #ifdef/#ifndef not followed by an identifier
 				UNEXPECTED_END,          // #end with no open #ifdef/#ifndef (or #macro)
 				UNTERMINATED_IF,         // #ifdef/#ifndef block still open at the end of the input
-				UNTERMINATED_DIRECTIVE   // #define/#macro/macro call still incomplete at the end of the input
+				UNTERMINATED_DIRECTIVE,  // #define/#macro/macro call still incomplete at the end of the input
+				MACRO_ARG_COUNT_MISMATCH, // macro called with a different number of arguments than #macro declared
+				EXPECTED_MACRO_CALL      // macro that takes arguments used without NAME(...)
 			};
 
 			inline const char* preprocessErrorName(int code) {
@@ -589,6 +590,8 @@ namespace assembler {
 				case PreprocessError::UNEXPECTED_END: return "#end without matching #ifdef/#ifndef";
 				case PreprocessError::UNTERMINATED_IF: return "#ifdef/#ifndef without matching #end";
 				case PreprocessError::UNTERMINATED_DIRECTIVE: return "unterminated directive";
+				case PreprocessError::MACRO_ARG_COUNT_MISMATCH: return "wrong number of macro arguments";
+				case PreprocessError::EXPECTED_MACRO_CALL: return "expected ( after macro name";
 				}
 				return "unknown error";
 			}
@@ -666,11 +669,44 @@ namespace assembler {
 
 			FunctionRef<int(std::vector<lexer::Token>&, std::string, PreprocData*)> includeCallback;
 
+			// Substitutes the collected args into data->replaceTokens and inserts the result at `it`
+			// (it then points at the first inserted token, so the expansion is preprocessed too).
+			int expandMacro(Vec tokens, Iter it, PreprocData* data) {
+				for (auto si = data->replaceTokens.begin(); si != data->replaceTokens.end(); ) {
+					if (si->type == TokenType::macro_arg) {
+						int id = macroArg2int(si->text) - 1;
+						if (id < 0 || id >= (int)data->args.size())
+							return (int)PreprocessError::MACRO_ARG_OUT_OF_RANGE;
+						si = data->replaceTokens.erase(si);
+						si = data->replaceTokens.insert(si, data->args[id].begin(), data->args[id].end());
+					}
+					else if (si->type == TokenType::identifier_unique) {
+						Token tmp = {};
+						tmp.text = si->text + "#" + std::to_string(data->uniqueCounter);
+						tmp.type = TokenType::identifier;
+						si = data->replaceTokens.erase(si);
+						si = data->replaceTokens.insert(si, tmp);
+					}
+					else
+						++si;
+				}
+				data->uniqueCounter++;
+				it = tokens.insert(it, data->replaceTokens.begin(), data->replaceTokens.end());
+				data->state = State::normal;
+				return (int)PreprocessError::SUCCESS;
+			}
+
 			int handleReplace(Vec tokens, Iter it, void* vpdata) {
 				PreprocData* data = (PreprocData*)vpdata;
 
 				switch (data->state) {
-				case State::replace_identifier:
+				case State::replace_identifier: {
+					// the call must start with '(' (a 0-arg macro without one was already
+					// expanded in State::normal)
+					if (data->depth == 0 && it->type != TokenType::openparen)
+						return (int)PreprocessError::EXPECTED_MACRO_CALL;
+
+					bool complete = false;
 					switch (it->type) {
 					case TokenType::comma:
 						if (data->depth == 1) {
@@ -689,13 +725,17 @@ namespace assembler {
 						it = tokens.erase(it);
 						break;
 					case TokenType::closeparen:
-						data->depth--; 
+						data->depth--;
 						if (!data->depth) {
-							if (data->args.size()) {
+							// last argument; NAME() has none (no comma seen and nothing collected)
+							if (!data->args.empty() || !data->curArg.empty()) {
 								data->args.push_back(data->curArg);
 								data->curArg.clear();
 								data->remainingArg--;
 							}
+							if (data->remainingArg != 0)
+								return (int)PreprocessError::MACRO_ARG_COUNT_MISMATCH;
+							complete = true;
 						}
 						else
 							data->curArg.push_back(*it);
@@ -706,30 +746,12 @@ namespace assembler {
 						it = tokens.erase(it);
 						break;
 					}
-					if (!data->remainingArg && !data->depth) {
-						for (auto si = data->replaceTokens.begin(); si != data->replaceTokens.end(); ) {
-							if (si->type == TokenType::macro_arg) {
-								int id = macroArg2int(si->text) - 1;
-								if (id < 0 || id >= data->args.size())
-									return (int)PreprocessError::MACRO_ARG_OUT_OF_RANGE;
-								si = data->replaceTokens.erase(si);
-								si = data->replaceTokens.insert(si, data->args[id].begin(), data->args[id].end());
-							}
-							else if (si->type == TokenType::identifier_unique) {
-								Token tmp = {};
-								tmp.text = si->text + "#" + std::to_string(data->uniqueCounter);
-								tmp.type = TokenType::identifier;
-								si = data->replaceTokens.erase(si);
-								si = data->replaceTokens.insert(si, tmp);
-							}
-							else
-								++si;
-						}
-						data->uniqueCounter++;
-						it = tokens.insert(it, data->replaceTokens.begin(), data->replaceTokens.end());
-						data->state = State::normal;
+					if (complete) {
+						int code = expandMacro(tokens, it, data);
+						if (code) return code;
 					}
 					break;
+				}
 				
 				case State::remove:
 					switch (it->type) {
@@ -782,7 +804,15 @@ namespace assembler {
 						data->replaceTokens = find->second.first;
 						data->remainingArg = find->second.second;
 						data->args.clear();
+						data->curArg.clear();
 						data->depth = 0;
+
+						// a 0-arg macro may be written without "()": expand now instead of
+						// taking the next token as its argument list
+						if (data->remainingArg == 0 && (it == tokens.end() || it->type != TokenType::openparen)) {
+							int code = expandMacro(tokens, it, data);
+							if (code) return code;
+						}
 
 						break;
 					}
@@ -1076,6 +1106,8 @@ namespace assembler {
 			intruction,
 			label,
 			equate,
+			global,
+			_extern,
 
 			allocate,
 			allocate_zero,
@@ -1149,6 +1181,8 @@ namespace assembler {
 
 			label,
 			equate,
+			global,
+			_extern,
 
 			reg_ex,
 
@@ -1191,6 +1225,8 @@ namespace assembler {
 			{ NonterminalType::intruction, "intruction" },
 			{ NonterminalType::label, "label" },
 			{ NonterminalType::equate, "equate" },
+			{ NonterminalType::global, "global" },
+			{ NonterminalType::_extern, "extern" },
 			{ NonterminalType::allocate, "allocate" },
 			{ NonterminalType::allocate_zero, "allocate_zero" },
 
@@ -1260,6 +1296,8 @@ namespace assembler {
 			{ ASTNodeType::allocate_zero, "allocate_zero" },
 			{ ASTNodeType::label, "label" },
 			{ ASTNodeType::equate, "equate" },
+			{ ASTNodeType::global, "global" },
+			{ ASTNodeType::_extern, "extern" },
 
 			{ ASTNodeType::reg_ex, "reg_ex" },
 
@@ -1330,6 +1368,12 @@ namespace assembler {
 			{ { NT::section, AT::text_section, -1 }, { { TT::text, false, false }, { TT::identifier, true, false} } },
 			{ { NT::section, AT::data_section, -1 }, { { TT::data, false, false }, { TT::identifier, true, false} } },
 			{ { NT::section, AT::bss_section, -1 }, { { TT::bss, false, false }, { TT::identifier, true, false} } },
+
+			// outer_section: global/extern declarations outside .text/.data/.bss (before, between or after them)
+			{ { NT::outer_section, AT::outer_section, -1 }, { { NT::global, true, false }, { NT::outer_section, true, true } } },
+			{ { NT::outer_section, AT::outer_section, -1 }, { { NT::_extern, true, false }, { NT::outer_section, true, true } } },
+			{ { NT::outer_section, AT::outer_section, -1 }, { { NT::global, true, false } } },
+			{ { NT::outer_section, AT::outer_section, -1 }, { { NT::_extern, true, false } } },
 
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::allocate, true, false }, { NT::data_section, true, true } } },
 			{ { NT::data_section, AT::data_section, -1 }, { { NT::label, true, false }, { NT::data_section, true, true } } },
@@ -1468,8 +1512,10 @@ namespace assembler {
 			{ { NT::immidate8, AT::immidate8, -1 }, { { NT::expression, true, false } } },
 
 			{ { NT::label, AT::label, 0 }, { { TT::identifier, false, false }, { TT::colon, false, false } } },
-
 			{ { NT::equate, AT::equate, 0 }, { { TT::identifier, false, false }, { TT::equ, false, false }, { NT::expression, true, false } } },
+
+			{ { NT::global, AT::global, 1}, { { TT::global, false, false }, { TT::identifier, true, false } } },
+			{ { NT::_extern, AT::_extern, 1}, { { TT::_extern, false, false}, { TT::identifier, true, false } } },
 
 			{ { NT::allocate, AT::allocate, 0 }, { { NT::expression, true, false }, { TT::comma, false, false },  { NT::expression, true, false } } },
 			{ { NT::allocate_zero, AT::allocate_zero, 0 }, { { NT::expression, true, false } } },
@@ -1657,7 +1703,9 @@ namespace assembler {
 				SUCCESS = 0,
 				MISSING_EXPRESSION,  // a child node's expression value wasn't computed (unresolved identifier / invalid subexpression)
 				NEGATIVE_INDEX,      // index[...] evaluated to a negative constant
-				NOT_CONSTANT         // a size/length expression (allocate, allocate_zero) must fold to a constant
+				NOT_CONSTANT,        // a size/length expression (allocate, allocate_zero) must fold to a constant
+				GLOBAL_UNDEFINED,    // `global name` but name is never defined in this file
+				EXTERN_DEFINED       // `extern name` but name is also defined in this file
 			};
 
 			inline const char* evaluateErrorName(int code) {
@@ -1666,6 +1714,8 @@ namespace assembler {
 				case EvaluateError::MISSING_EXPRESSION: return "missing expression";
 				case EvaluateError::NEGATIVE_INDEX: return "negative index";
 				case EvaluateError::NOT_CONSTANT: return "not constant";
+				case EvaluateError::GLOBAL_UNDEFINED: return "global symbol is not defined in this file";
+				case EvaluateError::EXTERN_DEFINED: return "extern symbol is defined in this file";
 				}
 				return "unknown error";
 			}
@@ -1716,6 +1766,9 @@ namespace assembler {
 
 			typedef struct _EvalData {
 				std::string fileName; // set before evaluation; read by format::formatData() (via mangleLabel) when building the serialized Format, not used during evaluation itself -- idenifierValue/expressionValue stay keyed by the raw label name throughout evaluation
+
+				std::unordered_set<std::string> globalIdentifier;
+				std::unordered_set<std::string> externIdentifier;
 
 				std::unordered_map<std::string, ExprData> idenifierValue;
 				std::unordered_map<AST*, ExprData> expressionValue;
@@ -2225,6 +2278,9 @@ namespace assembler {
 					auto find = data->idenifierValue.find(cur->text);
 					if (find != data->idenifierValue.end())
 						data->expressionValue[cur] = find->second;
+					// defined in another file: value unknown until link, so always relocated
+					else if (data->externIdentifier.find(cur->text) != data->externIdentifier.end())
+						data->expressionValue[cur] = { ExprType::COMPLEX, 0, {}, { { OperationType::IDENTIFIER, cur->text } } };
 					break;
 				}
 
@@ -2247,6 +2303,13 @@ namespace assembler {
 				if (code) return code;
 
 				switch (cur->type) {
+				case (u64)ASTNodeType::global + (u64)TokenType::__end:
+					data->globalIdentifier.insert(cur->text);
+					break;
+				case (u64)ASTNodeType::_extern + (u64)TokenType::__end:
+					data->externIdentifier.insert(cur->text);
+					break;
+					
 				case (u64)ASTNodeType::instruction_N + (u64)TokenType::__end:
 				case (u64)ASTNodeType::instruction_R + (u64)TokenType::__end:
 				case (u64)ASTNodeType::instruction_RI + (u64)TokenType::__end:
@@ -2395,6 +2458,16 @@ namespace assembler {
 				u32 sectionId = data->sectionIdMap[cur];
 
 				switch (cur->type) {
+				// calculateAddr has defined every label/equ by now
+				case (u64)ASTNodeType::global + (u64)TokenType::__end:
+					if (data->idenifierValue.find(cur->text) == data->idenifierValue.end())
+						return (int)EvaluateError::GLOBAL_UNDEFINED;
+					break;
+				case (u64)ASTNodeType::_extern + (u64)TokenType::__end:
+					if (data->idenifierValue.find(cur->text) != data->idenifierValue.end())
+						return (int)EvaluateError::EXTERN_DEFINED;
+					break;
+
 				case (u64)ASTNodeType::equate + (u64)TokenType::__end: {
 					if (data->idenifierValue.find(cur->text) != data->idenifierValue.end())
 						break;
@@ -2658,7 +2731,11 @@ namespace assembler {
 					nOper.type = (u32)si->type;
 
 					if (si->type == evaluator::functions::OperationType::IDENTIFIER) {
-						std::string mangled = evaluator::functions::mangleLabel(data.fileName, si->text);
+						// global (defined here) and extern (defined elsewhere) names are linked by their
+						// plain name; everything else is file-local and gets the file prefix
+						std::string mangled = si->text;
+						if (data.globalIdentifier.find(si->text) == data.globalIdentifier.end() && data.externIdentifier.find(si->text) == data.externIdentifier.end())
+							mangled = evaluator::functions::mangleLabel(data.fileName, si->text);
 						auto find = usedIdentifierIndex.find(mangled);
 						if (find == usedIdentifierIndex.end()) {
 							u32 idx = (u32)format.usedIdentifier.size();
@@ -2685,7 +2762,9 @@ namespace assembler {
 
 			for (auto it = data.idenifierValue.cbegin(); it != data.idenifierValue.cend(); ++it) {
 				Identifier nId = {};
-				nId.name = evaluator::functions::mangleLabel(data.fileName, it->first);
+				nId.name = it->first;
+				if (data.globalIdentifier.find(it->first) == data.globalIdentifier.end())
+					nId.name = evaluator::functions::mangleLabel(data.fileName, it->first);
 				if (it->second.coeff.empty()) {
 					nId.section = "";
 					nId.sectionIndex = (u32)-1;
@@ -2721,6 +2800,9 @@ namespace assembler {
 				nSec.type = (u32)it->type;
 				nSec.start = base;
 				nSec.end = base + (u32)it->data.size();
+				// label offsets are counted in sectionByte, which also covers .bss reservations
+				// that put no bytes in data
+				nSec.size = data.sectionByte[(size_t)(it - data.sections.cbegin())];
 				format.sections.push_back(nSec);
 				format.binary.insert(format.binary.end(), it->data.begin(), it->data.end());
 			}
@@ -2733,7 +2815,7 @@ namespace assembler {
 		}
 	}
 
-	const unsigned long long version = 405;
+	const unsigned long long version = 407;
 
 	namespace cache {
 		using u64 = unsigned __int64;
@@ -3222,19 +3304,21 @@ namespace assembler {
 			return (int)preprocesser::functions::PreprocessError::SUCCESS;
 		};
 
-		// "error at <file> line <n>: <source line>" for a token tagged by tagLine()
-		auto describeLocation = [&](const Token& tok) {
-			std::string msg = "error at ";
+		// "<file>:<line>: error: <detail>" + the source line, for a token tagged by tagLine()
+		// (a token without a line -- e.g. end of input -- reports just the main file)
+		auto describeError = [&](const Token& tok, const std::string& detail) {
 			if (tok.line < 0)
-				return msg + includedFiles[0] + ": ";
-			msg += (tok.fileId >= 0 && tok.fileId < (int)includedFiles.size()) ? includedFiles[tok.fileId] : std::to_string(tok.fileId);
-			msg += " line ";
-			msg += std::to_string(tok.fileLine);
-			msg += ": ";
+				return iotools::Terminal::codeError(includedFiles[0], detail);
+			std::string file = (tok.fileId >= 0 && tok.fileId < (int)includedFiles.size()) ? includedFiles[tok.fileId] : std::to_string(tok.fileId);
+			std::string msg = iotools::Terminal::codeError(iotools::errPosGenerator(file, tok.fileLine), detail);
+			std::string source;
 			auto range = tokenBackup.equal_range(tok.line);
 			for (auto it = range.first; it != range.second; ++it)
 				if (it->second.type != TokenType::newline)
-					msg += it->second.text;
+					source += it->second.text;
+			size_t first = source.find_first_not_of(" \t");
+			if (first != std::string::npos)
+				msg += "\n    " + source.substr(first);
 			return msg;
 		};
 
@@ -3260,13 +3344,10 @@ namespace assembler {
 		}
 
 		if (!validPreprocess) {
-			dump.errorMessage = describeLocation(errorTok);
-			dump.errorMessage += "\n ";
-			dump.errorMessage += preprocesser::functions::preprocessErrorName(preprocessError);
-			if (errorTok.line >= 0) {
-				dump.errorMessage += ": ";
-				dump.errorMessage += errorTok.text;
-			}
+			std::string detail = preprocesser::functions::preprocessErrorName(preprocessError);
+			if (errorTok.line >= 0)
+				detail += ": " + errorTok.text;
+			dump.errorMessage = describeError(errorTok, detail);
 			return -1;
 		}
 
@@ -3281,9 +3362,7 @@ namespace assembler {
 
 		if (dump.flags & AssemblerDump::getEval || !validParse) {
 			if (!validParse) {
-				dump.errorMessage = describeLocation(errorTok);
-				dump.errorMessage += "\n unexpected token: ";
-				dump.errorMessage += errorTok.text;
+				dump.errorMessage = describeError(errorTok, "unexpected token: " + errorTok.text);
 			}
 		}
 
@@ -3300,11 +3379,7 @@ namespace assembler {
 		dump.errorCode |= (validEvaluate) ? 0 : (int)AssemblerDump::FAIL_EVALUATE;
 
 		if (!validEvaluate) {
-			dump.errorMessage = describeLocation(errorTok);
-			dump.errorMessage += "\n ";
-			dump.errorMessage += evaluator::functions::evaluateErrorName(evaluateError);
-			dump.errorMessage += ": ";
-			dump.errorMessage += errorTok.text;
+			dump.errorMessage = describeError(errorTok, std::string(evaluator::functions::evaluateErrorName(evaluateError)) + ": " + errorTok.text);
 			parser::parser.delAST(pAST);
 			return -1;
 		}
