@@ -463,6 +463,15 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
 61. (2026-10-11) 저장소 루트를 `src/assembler-linker/` → `src/`로 이동(`.git` 포함). `csvsearcher/`·`textediter/`는 `.gitignore`. `hexdump/`는 저장소에 포함, `build-hex.cmd` 추가(→ `build/hexdump.exe`). 빈 `src/assembler-linker` 폴더는 핸들이 잡혀 삭제 실패(수동 삭제).
 62. (2026-10-11) 터미널 입출력 통일(`CLI.md`): `common/iotool.hpp`에 `errPosGenerator`(GCC 형식 위치)와 `Terminal::TerminalIO<FlagType>`(공용 인자 파서) + 공유 오류/IO 함수(`toolError`/`codeError`/`readFailed`/`writeFailed`/`usageError`/`parseNumber`, 종료 코드 0/1/2). 세 main이 사용, stdout=요청 출력·stderr=진단. `assemble()`의 위치 오류는 `describeError`가 `<file>:<line>: error: <detail>\n    <소스>`로 만듦. hexdump는 `-o` 추가, 값 검사로 0 나누기/NULL 크래시 해결. 회귀 25/29 바이너리 배포본과 동일. 같은 날 SYNTAX.md 1·9·10절 갱신, `bin/`·`digital computer 32/tools`에 dasm/dlnk/hexdump 배포.
 
+63. (2026-10-11) `.data` 목록/문자열 데이터(사용자 초안 문법 완성): `allocate_list` = `total(element), {e0, e1, ...}`(NT `list`/`listtail`, AT `list`), `allocate_string` = `total, "str"`. version 407→408. `calculateAddr`에서 total/element 상수·`total%element==0`·원소 수/문자열 길이 검사(새 에러 `INVALID_SIZE`/`INITIALIZER_TOO_LONG`). `evaluateCode`: 원소마다 `element, 값` allocate와 같은 방식(`pushByteN` + 비상수면 `ReplaceData` size=min(32, element*8)), 모자란 원소는 0. 문자열은 `string2bytes`(이스케이프 \n \t \r, 10진 최대 3자리)로 디코드 후 0으로 패딩, NUL 자동 추가 없음. 빈 목록 `{}`도 허용(전부 0, version 409). 회귀 25개 배포본과 바이트 동일. SYNTAX.md 4·5·8·10절 갱신. 같은 날 `bin/`·`digital computer 32/tools/bin`에 dasm 배포(table 재생성 465808바이트 — 새 CLI라 인자 없이 실행하면 table을 안 만들어서 실제 파일을 한 번 어셈블해 생성), tools 미러에 `assembler.hpp`·`SYNTAX.md` 복사. dlnk/hexdump는 변경 없음.
+
+64. (2026-10-12) 바이트 순서 플래그 `-big`/`-little`(기본 little, 같이 주면 usage 오류) + `TerminalIO` 플래그를 u64(최대 64개)로 확장(`parse(u64&,...)`, `has(u64,...)`, `1ull<<`; 세 main의 `flags`도 `iotools::u64`).
+    - **오브젝트 포맷 변경**: `Header`에 `endian` 필드(14필드, 56바이트), `Format::endian`(`format_data::Endian` LITTLE=0/BIG=1). 오브젝트 메타데이터 자체(push32/read32)는 계속 빅엔디안 고정. 이전 .o는 `invalid object file`로 거부됨 — 재어셈블 필요.
+    - dasm: 전역 `assembler::bigEndian`. `push32`는 `pushByteN(…,4)`로, `pushByteN`은 빅엔디안 바이트열(5바이트 이상 끝 기준 반복 그대로)을 만들고 little이면 통째로 뒤집음. `registerReplace` 키는 big=`start+byte-1-offset/8`, little=`start+offset/8`.
+    - dlnk: 전역 `linker::bigEndian`, `link()`가 오브젝트 순서가 다르면 `object file 'x' is big-endian, linking little-endian (use -big)`. `mapExpr` 패치는 little이면 뒤 바이트로 확장(끝 넘으면 실패).
+    - hexdump: 표시만 바꿈 — little은 각 `-bundle` 묶음 바이트를 뒤집어 출력(끝의 모자란 묶음은 왼쪽이 빔), big은 파일 순서(예전 출력). 문자 열은 항상 파일 순서. dump 함수는 `hexColumn`/`textColumn`으로 재작성.
+    - 검증: 회귀 25개 — `-big` 결과가 배포본 바이너리와 바이트 단위 동일, little 결과는 전부 정확히 워드 단위 뒤집힘. 2/1/5바이트 데이터, 2바이트 목록 재배치, 16비트 즉시값 재배치를 손으로 확인. 순서 불일치/옛 오브젝트/플래그 충돌 오류 확인. SYNTAX.md 1·4·7절 갱신. 배포 안 함.
+
 ## 작업 방식 관련 주의사항
 
 - ~~빌드/테스트를 자동으로 수행하지 말 것~~ → 2026-10-11 해제: 변경 후 빌드와 회귀 테스트(`test/program`, 25/29 성공 기대)는 묻지 않고 해도 됨. 배포/커밋은 요청 시에만.
