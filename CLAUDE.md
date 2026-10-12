@@ -470,7 +470,7 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
     - dasm: 전역 `assembler::bigEndian`. `push32`는 `pushByteN(…,4)`로, `pushByteN`은 빅엔디안 바이트열(5바이트 이상 끝 기준 반복 그대로)을 만들고 little이면 통째로 뒤집음. `registerReplace` 키는 big=`start+byte-1-offset/8`, little=`start+offset/8`.
     - dlnk: 전역 `linker::bigEndian`, `link()`가 오브젝트 순서가 다르면 `object file 'x' is big-endian, linking little-endian (use -big)`. `mapExpr` 패치는 little이면 뒤 바이트로 확장(끝 넘으면 실패).
     - hexdump: 표시만 바꿈 — little은 각 `-bundle` 묶음 바이트를 뒤집어 출력(끝의 모자란 묶음은 왼쪽이 빔), big은 파일 순서(예전 출력). 문자 열은 항상 파일 순서. dump 함수는 `hexColumn`/`textColumn`으로 재작성.
-    - 검증: 회귀 25개 — `-big` 결과가 배포본 바이너리와 바이트 단위 동일, little 결과는 전부 정확히 워드 단위 뒤집힘. 2/1/5바이트 데이터, 2바이트 목록 재배치, 16비트 즉시값 재배치를 손으로 확인. 순서 불일치/옛 오브젝트/플래그 충돌 오류 확인. SYNTAX.md 1·4·7절 갱신. 배포 안 함.
+    - 검증: 회귀 25개 — `-big` 결과가 배포본 바이너리와 바이트 단위 동일, little 결과는 전부 정확히 워드 단위 뒤집힘. 2/1/5바이트 데이터, 2바이트 목록 재배치, 16비트 즉시값 재배치를 손으로 확인. 순서 불일치/옛 오브젝트/플래그 충돌 오류 확인. SYNTAX.md 1·4·7절, CLI.md 2절 갱신. 같은 날 `bin/`·`digital computer 32/tools/bin`에 dasm/dlnk/hexdump 배포(table.bin 전부 삭제 후 재생성), tools 미러에 소스 7개+SYNTAX.md 복사. **주의**: `digital computer 32`의 `isa32emu.py`(fp_test.py)와 dsim `Sim`(ProgramMemoryLoader bigEndian=true)은 빅엔디안 프로그램을 읽으므로 그쪽에 넣을 바이너리는 `-big`으로 만들어야 함(미수정).
 
 ## 작업 방식 관련 주의사항
 
