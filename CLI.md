@@ -10,6 +10,7 @@
   - 공유 오류: `codeError`, `toolError`, `readFailed`, `writeFailed`, `noInput`, `invalidValue`, `printError`, `printDiagnostic`, `usageError`, `parseNumber`, `EXIT_OK/EXIT_FAIL/EXIT_USAGE`. 프로그램 고유 오류는 각 프로그램에서 만든다.
 - dasm / dlnk / hexdump의 main이 모두 이 파서를 쓴다. 위치 오류는 3번(GCC 형식)까지 반영됨.
 - hexdump: `-o` 추가, 파일 읽기는 `iotools`. `-width`만 주면 묶음 크기도 width를 따른다(예전 빌드는 항상 4로 묶였음).
+- 이후 추가된 옵션 (2026-10-12 ~ 10-17): 세 도구 공통 `-big`/`-little`, dlnk `-org N`, `-raw`, `-start <label>`. 현재 dlnk 형식: `<in...> [-o out] [-big|-little] [-org N] [-padbss] [-raw | -start <label>] [-v]`. 설명은 `SYNTAX.md` 1·9절.
 - `-v`는 dlnk에만 있다. 값 생략 옵션(`-align=8`)은 아직 파서에 없다 (`-align` 구현 때 추가).
 
 ## 1. 구현 전 상태 (기록용)

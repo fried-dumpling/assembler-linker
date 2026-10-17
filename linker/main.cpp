@@ -25,6 +25,8 @@ enum LinkFlag {
 	FLAG_ORG,
 	FLAG_BIG,
 	FLAG_LITTLE,
+	FLAG_RAW,
+	FLAG_START,
 	FLAG_VERBOSE,
 	FLAG_HELP,
 	FLAG_HELP_LONG
@@ -40,6 +42,8 @@ int main(int argc, char* argv[]) {
 		{ "-org",    FLAG_ORG,       true,  {}, "address of the first output byte (default 0)" },
 		{ "-big",    FLAG_BIG,       false, {}, "link big-endian objects" },
 		{ "-little", FLAG_LITTLE,    false, {}, "link little-endian objects (default)" },
+		{ "-raw",    FLAG_RAW,       false, {}, "write the program only, without the {start, length} header" },
+		{ "-start",  FLAG_START,     true,  {}, "label whose address goes into the header (default _start)" },
 		{ "-v",      FLAG_VERBOSE,   false, {}, "print a summary of the link" },
 		{ "-h",      FLAG_HELP,      false, {}, "show this help" },
 		{ "-help",   FLAG_HELP_LONG, false, {}, "show this help" },
@@ -65,6 +69,12 @@ int main(int argc, char* argv[]) {
 	if (CLI::has(flags, FLAG_BIG) && CLI::has(flags, FLAG_LITTLE))
 		return iotools::Terminal::usageError("-big and -little cannot be used together", terminal.usage());
 	linker::bigEndian = CLI::has(flags, FLAG_BIG);
+	linker::formatted = !CLI::has(flags, FLAG_RAW);
+	if (CLI::has(flags, FLAG_START)) {
+		if (!linker::formatted)
+			return iotools::Terminal::usageError("-start cannot be used with -raw", terminal.usage());
+		linker::startLabel = terminal.value(FLAG_START);
+	}
 
 	std::vector<std::pair<std::string, std::vector<unsigned char>>> rawObjects;
 	for (auto it = inputFiles.begin(); it != inputFiles.end(); ++it) {

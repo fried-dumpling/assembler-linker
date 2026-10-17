@@ -7,7 +7,7 @@
 
 ```
 dasm <input.txt> [-o <output.o>] [-big|-little] [-file] [-token] [-preproc] [-eval] [-bin]
-dlnk <input1.o> [input2.o ...] [-o <output.bin>] [-big|-little] [-org N] [-padbss] [-v]
+dlnk <input1.o> [input2.o ...] [-o <output.bin>] [-big|-little] [-org N] [-padbss] [-raw | -start <label>] [-v]
 hexdump <file> [-o <output.txt>] [-big|-little] [-nodec] [-width N] [-bundle N]
 ```
 
@@ -23,6 +23,8 @@ hexdump <file> [-o <output.txt>] [-big|-little] [-nodec] [-width N] [-bundle N]
 | dasm | `-bin` | 섹션별 바이트 + 최종 오브젝트 바이트 |
 | dlnk | `-org N` | 출력 첫 바이트의 주소 (기본 0, 9절) |
 | dlnk | `-padbss` | `.bss` 크기만큼 0을 바이너리 끝에 채움 (9절) |
+| dlnk | `-raw` | 헤더 없이 프로그램만 출력 (9절) |
+| dlnk | `-start <label>` | 헤더의 시작 주소로 쓸 라벨 (기본 `_start`, 9절). `-raw`와 같이 쓸 수 없음 |
 | dlnk | `-v` | 링크 요약(`linked N file(s) -> ...`)을 stderr에 출력 |
 | hexdump | `-nodec` | 오른쪽 문자 열 없이 16진수만 |
 | hexdump | `-width N` | 한 줄 바이트 수 (기본 4) |
@@ -74,7 +76,7 @@ start:
 
 | 섹션 | 라벨 `name:` | 명령어 | 데이터 `size, value` / 목록 / 문자열 | 예약 `size` | `name equ expr` |
 |---|---|---|---|---|---|
-| `.text` | O | O | X | X | **X** |
+| `.text` | O | O | X | X | O |
 | `.data` | O | X | O | X | O |
 | `.bss` | O | X | X | O | O |
 
@@ -396,6 +398,16 @@ global section       ; 이름 없는 섹션(.text / .data / .bss)
 - 그룹 안에서는 처음 등장한 (종류, 이름) 순서를 따릅니다. 같은 종류·같은 이름의 섹션은 하나로 합쳐지고 입력 파일 순서대로 이어 붙습니다. 섹션 이름은 파일마다 따로라서(`파일명#이름`) 파일 사이에서는 `global section`으로 선언한 섹션만 합쳐집니다(8절).
   - 예: `a.o`에 `.text x`, `.text y`, `b.o`에 `.text x`가 있으면 기본은 `a#x`, `a#y`, `b#x` 순서이고, 두 파일 모두 `global section x`면 `x`(a, b), `a#y` 순서입니다.
 - `.bss`는 주소만 차지하고 출력 바이너리에는 들어가지 않습니다. 바이너리는 text와 data 바이트뿐입니다. `-padbss`를 주면 `.bss` 크기만큼 0이 바이너리 끝에 붙습니다(주소는 그대로).
+- **헤더 (기본)**: 출력 파일 맨 앞에 8바이트 헤더가 붙습니다. 각 필드는 출력 바이트 순서(`-big`/`-little`)의 4바이트 워드입니다.
+
+  | 바이트 | 내용 |
+  |---|---|
+  | 0–3 | 시작 라벨의 주소 (`-org` 포함) |
+  | 4–7 | 프로그램 길이: 헤더를 뺀 나머지 바이트 수 (`-padbss`면 bss 포함) |
+
+  - 헤더는 주소에 영향을 주지 않습니다. 프로그램의 첫 바이트(헤더 바로 뒤)가 주소 0(또는 `-org N`)입니다.
+  - 시작 라벨은 기본 `_start`이고 `-start <label>`로 바꿉니다. `global`로 내보낸 이름을 먼저 찾고, 없으면 파일 지역 라벨 중에서 찾습니다. 지역 라벨은 한 파일에만 있어야 합니다(여러 파일에 있으면 오류 — `global`로 선언).
+  - 라벨이 없으면 링크 오류입니다. 헤더가 필요 없으면 `-raw`를 줍니다(예전 출력과 같음).
 - 다른 파일의 이름은 `global`/`extern`으로 참조합니다(8절). 그 밖의 이름은 파일마다 따로라서, 여러 파일에 같은 라벨 이름이 있어도 충돌하지 않습니다.
 
 ## 10. 오류 메시지
@@ -414,5 +426,5 @@ global section       ; 이름 없는 섹션(.text / .data / .bss)
 | preprocess | `duplicate include`, `invalid include path`, `macro argument out of range`, `wrong number of macro arguments`, `expected ( after macro name`, `expected identifier after #define`, `#end without matching #ifdef/#ifndef`, `#ifdef/#ifndef without matching #end`, `unterminated directive` |
 | parse | `unexpected token: <토큰>` (입력 끝이면 `<EOF>`) |
 | evaluate | `missing expression` (정의되지 않은 이름), `negative index` (`gen[-1]`), `not constant` (데이터 크기가 상수가 아님), `invalid size` (음수 크기, 원소 크기가 0 이하이거나 전체 크기를 나누지 못함), `initializer too long` (목록 원소나 문자열이 크기보다 큼), `global symbol is not defined in this file`, `extern symbol is defined in this file`, `global section is not defined in this file` |
-| link | `invalid object file '<경로>'`, `undefined symbol '<이름>'`, `duplicate symbol '<이름>'` |
+| link | `invalid object file '<경로>'`, `undefined symbol '<이름>'`, `duplicate symbol '<이름>'`, `start label '<이름>' is not defined (use -start <label> or -raw)`, `start label '<이름>' is defined locally in more than one file (...); declare it global` |
 | 공통 | `cannot read file '<경로>'`, `cannot write file '<경로>'`, `no input file`, `unknown flag '<옵션>'`, `missing value for '<옵션>'`, `invalid value for '<옵션>': '<값>'`, `unexpected argument '<인자>'` |

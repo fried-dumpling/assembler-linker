@@ -1418,9 +1418,11 @@ namespace assembler {
 
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::intruction, true, false }, { NT::text_section, true, true } } },
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::label, true, false }, { NT::text_section, true, true } } },
+			{ { NT::text_section, AT::text_section, -1 }, { { NT::equate, true, false }, { NT::text_section, true, true } } },
 
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::intruction, true, false } } },
 			{ { NT::text_section, AT::text_section, -1 }, { { NT::label, true, false } } },
+			{ { NT::text_section, AT::text_section, -1 }, { { NT::equate, true, false } } },
 
 			{ { NT::intruction, AT::instruction_RR, -1 }, { { TT::add, true, false }, {NT::reg, true, false }, { TT::comma, false, false }, { NT::reg, true, false } } },
 			{ { NT::intruction, AT::instruction_RR, -1 }, { { TT::addc, true, false }, {NT::reg, true, false }, { TT::comma, false, false } ,{ NT::reg, true, false } } },
@@ -2994,7 +2996,7 @@ namespace assembler {
 		}
 	}
 
-	const unsigned long long version = 413;
+	const unsigned long long version = 414;
 
 	namespace cache {
 		using u64 = unsigned __int64;
