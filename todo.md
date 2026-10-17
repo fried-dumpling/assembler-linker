@@ -43,11 +43,14 @@
 ### 커밋
 - [x] 이 저장소: 2026-10-11 커밋 (저장소 루트가 `src/`로 바뀐 뒤 첫 커밋).
 - [ ] `digital computer 32` 저장소: ISA.md와 tools가 커밋되지 않음 (2026-10-11 tools 재배포분 포함). 다른 세션(floatingpoint)의 변경도 섞여 있으니 범위를 나눠서 커밋할 것.
+- [ ] 추후 이 저장소(`src/`)를 `digital computer 32` 저장소로 git 통합.
+  - 지금은 소스를 `digital computer 32/tools` 미러에 수동으로 복사하고 있음. 통합하면 복사가 필요 없음.
+  - 이 저장소의 커밋 히스토리를 보존하는 방식(subtree 등)으로 합칠 것.
 
 ### 목표
 - [x] linker: bss padding 구현. (`-padbss` 플래그, `linker::bssPadding`)
-- [ ] assembler: 문자열 추가
-- [ ] assembler: 리스트 추가
+- [x] assembler: 문자열 추가
+- [x] assembler: 리스트 추가
 - [x] assembler / linker: `-o <출력 파일>` 플래그 추가 (현재는 위치 인자로 출력 파일을 받음)
 - [x] 터미널 입출력 통일 (`CLI.md`): `iotools::Terminal`/`errPosGenerator`, dasm·dlnk·hexdump 적용, GCC 형식 위치 오류, 종료 코드 0/1/2.
 - [ ] `-align [byte]` 플래그로 word 정렬 (값 생략 시 4바이트).
@@ -66,10 +69,7 @@
 - [ ] 중첩 `#include`의 경로 기준이 항상 최초 입력 파일의 디렉터리 (`PreprocData::fileName`이 갱신되지 않음).
 - [ ] `gen[n]` 인덱스 범위 검사 없음 (25 이상이면 특수 레지스터 id와 겹침).
 - [ ] global/extern 오류 메시지의 토큰이 이름이 아니라 키워드로 표시됨.
-- [ ] ISA 시트(xlsx)와 다른 부분 (ISA.md 6절):
-  - `pctl`, `getabs`, 캐시 명령어 체계의 opcode/인코딩이 시트와 다름.
-  - `atom` 미구현.
-  - `intervec`의 첫 피연산자가 base 레지스터가 아니라 `reg` 키워드라 항상 0.
-  - `rol` / `ror` 방향이 이름과 반대.
+- [x] ISA 시트(xlsx)와 다른 부분: `pctl`/`getabs`/`cache`(flush·inval)/`atom`/`intervec` 시트에 맞춤 (2026-10-17).
+- [ ] ISA 남은 확인 (ISA.md 6절): md 비트 방향(flush=1 가정), `rol`/`ror` 방향, `jp`/`jpi`/`break` 이름.
 - [ ] 문자열 리터럴(`"..."`)은 렉서만 인식하고 문법에 연결되지 않음.
 - [ ] `digital computer 32` 쪽 CLAUDE.md의 도구 설명이 예전 상태.

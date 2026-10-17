@@ -25,6 +25,10 @@ namespace linker {
     // byte order of the output (dlnk -big / -little, default little); every input object must
     // have been assembled with the same order, since relocations are patched in it
     bool bigEndian = false;
+    // address of the first byte of the output (dlnk -org, default 0): the first placed group
+    // (text, or data when there is no text) starts here and every label is resolved against it.
+    // The binary itself still starts with that first byte -- nothing is padded in front.
+    int origin = 0;
 
     namespace format {
 		using u32 = unsigned __int32;
@@ -217,6 +221,11 @@ namespace linker {
 
                 std::vector<FileData> files;
 
+                // unmerged
+                // ordered section comes here
+                std::vector<Section> orders;
+                
+                // merged
                 // placement ledger, in original section order: where each merged (type, name)
                 // section ended up (absolute start/end) in `totalBin`. ROD is not implemented yet,
                 // so ROD/OUTER sections are skipped entirely (not merged, not placed).
@@ -415,7 +424,7 @@ namespace linker {
                     placements->push_back(placement);
                 }
 
-                data.textBase = 0;
+                data.textBase = (u32)origin;
                 data.dataBase = data.textBase + textSize;
                 data.bssBase = data.dataBase + dataSize;
 
@@ -543,7 +552,8 @@ namespace linker {
                             if (stackMachine::runOperation(elements, value) != 0)
                                 return false;
 
-                            u32 bytePos = si->sectionOffset + ti->first;
+                            // sectionOffset is an address (it includes origin); totalBin starts at origin
+                            u32 bytePos = si->sectionOffset - (u32)origin + ti->first;
                             if (bytePos >= data.totalBin.size())
                                 return false;
 
