@@ -486,6 +486,8 @@ enum class LinearKind { NONE, ADD_LIKE, SUB_LIKE, SCALE_LIKE, NEG_LIKE };
 
 69. (2026-10-17) `.text`에서 `equ` 허용: `text_section`에 equate 재귀/단독 규칙 2개 추가(data/bss와 같은 형태), version 413→414. 평가기는 변경 없음. 검증: text 안 상수 equ, `HERE equ $`(현재 위치), 전방 라벨 기반 `L equ later + 4`, 사용보다 뒤에 정의된 상수 equ, `.text`에 equ만 있는 섹션. 회귀 25개 배포본과 바이트 동일. 같은 날 dasm을 `bin/`·`digital computer 32/tools/bin`에 배포(dasm_table.bin 삭제 후 재생성 471306바이트), tools 미러에 assembler.hpp·SYNTAX.md 복사.
 
+70. (2026-10-18, "tools" 세션 요청) ISA 시트 EXT 갱신 반영: 토큰 `plimit`(별칭 `pagelimit`) = id 5, `pagebase` 별칭 `pbase`(같은 토큰으로 lex), 캐시 id `cacheid | 이름` 조합(자식 토큰 OR, `L1I | L1D` = 0x03). version 414→415. 회로(.dig)에는 EXT 레지스터 디코드가 아직 없어 시트 기준 ex-n → id n-1 유지. `jp`/`jpi`/`break` 별칭은 추가 안 함(라벨 이름 충돌 위험). `digital computer 32/program`·`boot` 17개 `.asm`이 이전 dasm과 바이트 동일, 회귀 25/29. tools/bin에 dasm 배포(table.bin 전부 삭제 후 재생성 486170바이트), tools 미러에 assembler.hpp·SYNTAX.md 복사, `document/ISA.md` 2·4·6절과 `document/todo.md` 갱신(그 저장소에서 미커밋). `computer 32 (new)/bin`은 이번에 배포 안 함.
+
 ## 작업 방식 관련 주의사항
 
 - ~~빌드/테스트를 자동으로 수행하지 말 것~~ → 2026-10-11 해제: 변경 후 빌드와 회귀 테스트(`test/program`, 25/29 성공 기대)는 묻지 않고 해도 됨. 배포/커밋은 요청 시에만.
